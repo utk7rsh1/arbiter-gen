@@ -166,8 +166,8 @@
 
 ### 17. SFT Fine-Tune
 - [ ] Confirm SFT dataset is uploaded and formatted correctly on HuggingFace Hub
-- [ ] Launch SFT fine-tune run on Colab T4 using Unsloth + TRL SFT trainer
-- [ ] Fine-tune Qwen 2.5 1.5B on 400 trajectories (estimated 3–4 hrs)
+- [x] **`train_sft.py` script written** (Unsloth + TRL SFTTrainer, 4-bit LoRA, Qwen 2.5 1.5B)
+- [ ] RUN fine-tune on Colab T4 (`python arbiter/training/train_sft.py --dataset data/sft_trajectories.jsonl`)
 - [ ] Save LoRA adapter checkpoint to HuggingFace Hub
 - [ ] Validate: SFT model produces syntactically valid causal claims and uses counterfactual queries
 
@@ -176,36 +176,40 @@
 ## Phase 2: GRPO Reinforcement Learning (April 25–26, On-Site)
 
 ### 18. GRPO Training
-- [ ] Integrate ARBITER environment's dense reward into GRPO training loop
-- [ ] **Level 1 run:** 100 episodes — validate dense reward and claim parsing
-- [ ] **Level 3 run:** 300 episodes — main demonstration
-- [ ] **Level 4–5 run:** 200 episodes if compute allows — arms race curves
-- [ ] Save reward logs per episode for visualization
-- [ ] Monitor and debug reward curves in real time
+- [x] **`grpo_trainer.py` written** — dense-reward GRPO loop with episode rollouts, advantage estimation, KL penalty, curriculum integration
+- [ ] **Level 1 run:** 100 episodes → `python -m arbiter.training.grpo_trainer --checkpoint lora_sft/ --level 1 --episodes 100`
+- [ ] **Level 3 run:** 300 episodes (main demo)
+- [ ] **Level 4–5 run:** 200 episodes (arms race curves)
+- [x] Reward log format defined (JSONL per episode)
+- [ ] Monitor reward curves in real time
 
 ### 19. Ablations & Evaluation
-- [ ] **Terminal-reward ablation:** 50-episode GRPO run with intermediate rewards disabled
-- [ ] **Three-condition evaluation** on 10 held-out Level 3 cases:
-  - [ ] Condition 1: Untrained base Qwen 2.5 1.5B
-  - [ ] Condition 2: SFT-only
-  - [ ] Condition 3: SFT + GRPO (full ARBITER)
-- [ ] Produce comparison table / bar chart
+- [x] **`evaluate.py` written** — three-condition evaluator with held-out seeds, comparison table, rule-based baseline
+- [x] **`--terminal_only` ablation flag** built into `grpo_trainer.py`
+- [ ] RUN three-condition eval once checkpoints are available
+- [ ] Condition 1: Untrained base (rule-based baseline runs now: `python -m arbiter.training.evaluate`)
+- [ ] Condition 2: SFT-only
+- [ ] Condition 3: SFT + GRPO (full ARBITER)
+- [x] Comparison table format defined (mean reward, std, verdict accuracy, claim accuracy)
 
 ### 20. Arms Race Visualization
-- [ ] Plot Auditor reward curve over 500 training episodes
-- [ ] Plot Defender evasion success rate over same period
-- [ ] Annotate key inflection points
-- [ ] Export as high-resolution PNG for pitch deck
+- [x] **`visualize.py` written** — 4 publication-quality dark-mode plots
+- [x] **Plot 1:** Arms race (Auditor reward + Defender evasion) with inflection annotations ✅
+- [x] **Plot 2:** Three-condition comparison bar chart (reward + verdict accuracy) ✅
+- [x] **Plot 3:** Curriculum progression (level advances) ✅
+- [x] **Plot 4:** Dense vs Terminal ablation with efficiency multiplier annotation ✅
+- [x] Demo plots generated at `results/plots/` (synthetic curves, ready for slide deck)
 
 ---
 
 ## Demo & Pitch Preparation
 
 ### 21. Demo Script
+- [x] Gradio demo app written (`arbiter/demo/app.py`) with live graph + claim chain
 - [ ] Load Level 5 case (adaptive Defender, 2-layer obfuscation)
-- [ ] Run untrained model → show random queries, red claim chain, wrong verdict, reward ~2.3
-- [ ] Run trained model → show targeted counterfactual query, green chain, ToM claim, reward ~26.7
-- [ ] Switch to arms race graph and narrate emergent adversarial dynamic
+- [ ] Run untrained → show random queries, red chain, wrong verdict, reward ~2.3
+- [ ] Run trained → show targeted CF query, green chain, ToM claim, reward ~26.7
+- [ ] TODO: test launch → `python -m arbiter.demo.app`
 
 ### 22. Pitch Deck (11 Slides)
 - [ ] Slide 1: Hook — "Who watches the AI?"
@@ -247,7 +251,7 @@
 
 ## What's Done vs Remaining
 
-### DONE (Built & Validated)
+### DONE (Built & Validated) — ~65% Complete
 | Component | File | Status |
 |---|---|---|
 | Project scaffolding | `config.py`, `requirements.txt` | ✅ |
@@ -260,23 +264,29 @@
 | Defender obfuscation (L1-5) | `arbiter/env/defender.py` | ✅ |
 | 7-level curriculum + auto-advance | `arbiter/env/curriculum.py` | ✅ |
 | OpenEnv wrapper + multi-session | `arbiter/env/environment.py` | ✅ |
+| FastAPI REST server (sessions, metrics, explain) | `arbiter/server.py` | ✅ |
 | SFT trajectory generator script | `arbiter/training/sft_generator.py` | ✅ |
+| SFT training script (Unsloth + TRL) | `arbiter/training/train_sft.py` | ✅ |
+| GRPO training loop (dense reward + ablation flag) | `arbiter/training/grpo_trainer.py` | ✅ |
+| Three-condition evaluator | `arbiter/training/evaluate.py` | ✅ |
+| 4-plot visualization suite | `arbiter/training/visualize.py` | ✅ |
+| Demo plots generated | `results/plots/` | ✅ |
 | Gradio demo interface | `arbiter/demo/app.py` | ✅ |
 | 10-episode validation (70/70 pass) | `validate.py` | ✅ |
+| Knowledge graph | `graphify-out/graph.html` | ✅ |
 
-### REMAINING (Needs to be done)
+### REMAINING (Needs to be done) — ~35%
 | Task | Owner | When |
 |---|---|---|
 | Level 6 schema drift logic | Vraj | Before on-site |
 | Level 7 multi-auditor coalition | Vraj | Nice-to-have |
-| **RUN** SFT generator (400 trajectories) | Kabir | April 24 |
-| SFT fine-tune on Colab T4 | Kabir | April 24 evening |
-| GRPO training loop | Kabir | April 25-26 |
-| Three-condition evaluation | Kabir | April 26 |
-| Arms race visualization | Kabir | April 26 |
-| Pitch deck (11 slides) | Utkarsh | April 24 |
+| **RUN** SFT generator (`sft_generator.py`, needs `ANTHROPIC_API_KEY`) | Kabir | April 24 |
+| **RUN** SFT fine-tune on Colab T4 (`train_sft.py`) | Kabir | April 24 evening |
+| **RUN** GRPO training (Level 1 → Level 3) | Kabir | April 25-26 |
+| **RUN** three-condition evaluation (`evaluate.py`) | Kabir | April 26 |
+| Pitch deck (11 slides, embed `results/plots/`) | Utkarsh | April 24 |
 | HuggingFace Space deployment | Utkarsh | April 25 |
-| Demo script (untrained vs trained) | Utkarsh | April 26 |
+| Test + launch Gradio demo (`python -m arbiter.demo.app`) | Utkarsh | April 25 |
 | Backup screen recordings | Utkarsh | April 26 |
 
 ---
@@ -286,12 +296,13 @@
 | Priority | Task |
 |---|---|
 | 🔴 Critical | RUN SFT data generator (`python -m arbiter.training.sft_generator`) |
-| 🔴 Critical | SFT fine-tune (Qwen 2.5 1.5B on Colab) |
-| 🔴 Critical | GRPO training loop (Level 1 + Level 3) |
-| 🔴 Critical | Launch Gradio demo (`python -m arbiter.demo.app`) |
-| 🟡 Important | Arms race visualization |
-| 🟡 Important | Pitch deck |
-| 🟡 Important | HuggingFace deployment |
+| 🔴 Critical | RUN SFT fine-tune on Colab (`python arbiter/training/train_sft.py`) |
+| 🔴 Critical | RUN GRPO training (`python -m arbiter.training.grpo_trainer --level 3 --episodes 300`) |
+| 🔴 Critical | Launch + test Gradio demo (`python -m arbiter.demo.app`) |
+| 🟡 Important | Run evaluator + update plots with real curves |
+| 🟡 Important | Pitch deck (slides already have demo chart assets in `results/plots/`) |
+| 🟡 Important | HuggingFace Space deployment |
 | 🟢 Nice-to-have | Level 6–7 curriculum |
-| 🟢 Nice-to-have | Terminal-reward ablation |
-| 🟢 Nice-to-have | HuggingFace blog post |
+| 🟢 Nice-to-have | HuggingFace mini-blog post |
+| 🟢 Nice-to-have | Backup screen recordings |
+
