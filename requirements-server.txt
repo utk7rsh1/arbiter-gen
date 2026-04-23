@@ -1,0 +1,21 @@
+# ── ARBITER server-only dependencies ─────────────────────────────────────────
+# Used by: arbiter/server.py + all arbiter/env/* modules
+#
+# Intentionally EXCLUDES training-time deps:
+#   torch, transformers, trl, unsloth, peft, datasets, anthropic, huggingface_hub
+# Those are only needed on Colab (SFT/GRPO training). The HF Space runs
+# inference + environment only, keeping the image < 200 MB.
+
+# Web server
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0     # [standard] adds uvloop + httptools for performance
+python-multipart>=0.0.9       # required by FastAPI for form/file parsing
+
+# Data validation
+pydantic>=2.0.0
+
+# Graph engine (used by graph.py, counterfactual.py, defender.py)
+networkx>=3.0
+
+# Numerics (used by graph.py, decoys.py, reward.py)
+numpy>=1.24.0
