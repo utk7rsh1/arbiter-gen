@@ -6,21 +6,13 @@ Panels:
   Bottom: Claim chain | Reward breakdown
   Tab 2:  Arms race dual-curve graph
 
-Usage (environment only, no model):
+Usage:
     python -m arbiter.demo.app
-
-Usage (with trained LoRA checkpoint):
-    python -m arbiter.demo.app --checkpoint lora_grpo/
-    python -m arbiter.demo.app --checkpoint lora_sft/
-    python -m arbiter.demo.app --checkpoint lora_grpo/ --level 5
 """
-import argparse
-import json
-import re
 import sys
-import time
+import json
+import textwrap
 from pathlib import Path
-from typing import Dict, List, Optional
 
 import gradio as gr
 import matplotlib
@@ -33,89 +25,13 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from arbiter.env.environment import ArbiterEnv
 
-# ── CLI args ──────────────────────────────────────────────────────────────────
-parser = argparse.ArgumentParser(description="ARBITER Gradio Demo")
-parser.add_argument(
-    "--checkpoint", default=None,
-    help="Path to a LoRA adapter directory (lora_sft/ or lora_grpo/). "
-         "If omitted, the demo runs in manual-query mode (no LLM)."
-)
-parser.add_argument("--level",  type=int, default=3, help="Starting curriculum level (1-7)")
-parser.add_argument("--port",   type=int, default=7860)
-parser.add_argument("--share",  action="store_true", help="Create a public Gradio link")
-# parse_known_args so Gradio's internal args don't cause conflicts
-args, _unknown = parser.parse_known_args()
+# ── Global state ───────────────────────────────────────────────────────────────
 
-# ── Model singleton (loaded once at startup if --checkpoint is provided) ──────
-_model      = None
-_tokenizer  = None
-_model_label: str = "Manual mode (no checkpoint)"
-
-SYSTEM_PROMPT = (
-    "You are an expert AI auditor investigating a synthetic AI Decision System "
-    "for hidden anomalies.\n"
-    "Output exactly one JSON action per turn. Available actions:\n"
-    "  QUERY_RECORDS, QUERY_FEATURE_DISTRIBUTION, QUERY_COUNTERFACTUAL,\n"
-    "  FLAG_HYPOTHESIS, CLAIM_CAUSAL, CLAIM_COUNTERFACTUAL, CLAIM_THEORY_OF_MIND, SUBMIT_REPORT.\n"
-    "Think step by step before acting. Be methodical. Use counterfactual queries whenever uncertain."
-)
-
-
-def _load_checkpoint(checkpoint_path: str) -> str:
-    """
-    Load a LoRA adapter from checkpoint_path.
-    Tries Unsloth first (fastest, GPU-optimised), then falls back to
-    transformers + PEFT (works on CPU too).
-    Returns a human-readable model label.
-    """
-    global _model, _tokenizer
-
-    import torch
-
-    print(f"[demo] Loading checkpoint: {checkpoint_path} …")
-    try:
-        from unsloth import FastLanguageModel
-        _model, _tokenizer = FastLanguageModel.from_pretrained(
-            model_name=checkpoint_path,
-            max_seq_length=1024,
-            load_in_4bit=True,
-        )
-        FastLanguageModel.for_inference(_model)
-        label = f"✅ Unsloth LoRA — {Path(checkpoint_path).name}"
-        print(f"[demo] {label}")
-        return label
-    except Exception as e_unsloth:
-        print(f"[demo] Unsloth unavailable ({e_unsloth}), falling back to transformers+PEFT…")
-
-    try:
-        from transformers import AutoModelForCausalLM, AutoTokenizer
-        from peft import PeftModel
-
-        _tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-1.5B-Instruct")
-        _tokenizer.pad_token = _tokenizer.eos_token
-
-        base = AutoModelForCausalLM.from_pretrained(
-            "Qwen/Qwen2.5-1.5B-Instruct",
-            device_map="auto",
-            torch_dtype=torch.float16,
-        )
-        _model = PeftModel.from_pretrained(base, checkpoint_path)
-        _model.eval()
-        label = f"✅ transformers+PEFT LoRA — {Path(checkpoint_path).name}"
-        print(f"[demo] {label}")
-        return label
-    except Exception as e_peft:
-        print(f"[demo] WARNING: Could not load checkpoint: {e_peft}")
-        _model, _tokenizer = None, None
-        return f"⚠️ Could not load checkpoint ({checkpoint_path}): {e_peft}"
-
-
-# ── Global demo state ─────────────────────────────────────────────────────────
 _env: ArbiterEnv = None
-_obs             = None
-_render          = None
-_arms_race_data  = {"auditor": [], "defender": []}
-_agent_history: List[Dict] = []   # conversation history for the LLM within an episode
+_obs = None
+_render = None
+_last_result = None
+_arms_race_data = {"auditor": [], "defender": []}
 
 # ── Action templates shown in the JSON editor ──────────────────────────────────
 
@@ -204,11 +120,11 @@ ACTION_DESCRIPTIONS = {
 # ── Environment helpers ────────────────────────────────────────────────────────
 
 def _get_env(level: int = 3) -> ArbiterEnv:
-    global _env, _obs, _render, _agent_history
+    global _env, _obs, _render, _last_result
     _env = ArbiterEnv(level=level)
     _obs = _env.reset()
     _render = _env.render()
-    _agent_history = []
+    _last_result = None
     return _env
 
 
@@ -460,15 +376,18 @@ def draw_arms_race(auditor_rewards: list, defender_evasion: list) -> plt.Figure:
 
     if len(auditor_rewards) > 100:
         ax.axvline(100, color="#fbbf24", linestyle=":", alpha=0.6)
-        ax.text(102, max(auditor_rewards) * 0.1, "Defender adapts", color="#fbbf24", fontsize=7)
+        ax.text(102, min(auditor_rewards) * 1.05, "Defender adapts",
+                color="#fbbf24", fontsize=7)
     if len(auditor_rewards) > 200:
         ax.axvline(200, color="#4ade80", linestyle=":", alpha=0.6)
-        ax.text(202, max(auditor_rewards) * 0.1, "Auditor catches up", color="#4ade80", fontsize=7)
+        ax.text(202, min(auditor_rewards) * 1.05, "Auditor catches up",
+                color="#4ade80", fontsize=7)
 
-    ax.set_xlabel("Training Episode", color="white", fontsize=9)
-    ax.set_ylabel("Score", color="white", fontsize=9)
-    ax.set_title("Arms Race: Auditor vs Defender Co-Evolution", color="white", fontsize=10)
-    ax.tick_params(colors="white")
+    ax.set_xlabel("Training Episode", color="#94a3b8", fontsize=9)
+    ax.set_ylabel("Score", color="#94a3b8", fontsize=9)
+    ax.set_title("Arms Race: Auditor vs Defender Co-Evolution",
+                 color="#94a3b8", fontsize=10)
+    ax.tick_params(colors="#94a3b8")
     ax.legend(facecolor="#1e293b", labelcolor="white", fontsize=8)
     ax.grid(color="#1e293b", linewidth=0.5)
     for spine in ax.spines.values():
@@ -548,102 +467,6 @@ def load_template(action_type: str):
     )
 
 
-def run_agent_step():
-    """
-    Execute ONE step driven by the loaded LLM.
-    If no model is loaded, falls back to a basic heuristic step.
-    """
-    global _obs, _render, _agent_history
-    if _env is None:
-        return draw_graph({}), "<p>Start episode first.</p>", draw_reward_panel({}), "No episode active."
-
-    if _model is not None:
-        action, action_text, obs_text = _generate_llm_action(_obs)
-    else:
-        # Minimal heuristic for no-model mode
-        step = _obs.get("step", 0)
-        action = {"type": "QUERY_RECORDS", "feature_filter": {}} if step < 3 else {
-            "type": "SUBMIT_REPORT",
-            "anomaly_type": "proxy_discrimination",
-            "primary_evidence_chain": [],
-            "affected_demographic": "unknown",
-            "recommended_action": "audit",
-        }
-        action_text = json.dumps(action)
-        obs_text = ""
-
-    _obs, reward, done, info = _env.step(action)
-    _render = _env.render()
-    _agent_history.append({"obs_text": obs_text, "action_text": action_text})
-
-    status_lines = [
-        f"**Step {_obs.get('step', '?')} | Reward: {reward:+.2f} | Done: {done}**",
-        f"Action: `{action_text[:120]}{'…' if len(action_text) > 120 else ''}`",
-    ]
-    if done:
-        ep_r = info.get("episode_reward", {})
-        terminal = ep_r.get("terminal", {})
-        status_lines.append(
-            f"✅ Episode complete — terminal reward: {terminal.get('terminal_total', 0):.2f}"
-        )
-    status_md = "\n\n".join(status_lines)
-
-    return draw_graph(_render), format_claim_chain(_render), draw_reward_panel(_render), status_md
-
-
-def run_full_episode(level: int):
-    """
-    Run an entire episode autonomously with the LLM (or heuristic if no model).
-    Yields updates every step for Gradio streaming.
-    """
-    global _obs, _render, _agent_history, _env
-    _get_env(level=int(level))
-
-    for step in range(20):
-        if _model is not None:
-            action, action_text, obs_text = _generate_llm_action(_obs)
-        else:
-            features = _obs.get("features", {}).get("explicit", [])
-            if step == 0:
-                action = {"type": "QUERY_RECORDS", "feature_filter": {}}
-            elif step == 1 and features:
-                action = {"type": "QUERY_FEATURE_DISTRIBUTION",
-                          "feature_id": features[0], "group_by": None}
-            elif step == 2:
-                action = {"type": "QUERY_COUNTERFACTUAL", "record_id": "rec_0000",
-                          "feature_id": "zip_code_cluster", "counterfactual_value": "cluster_3"}
-            else:
-                action = {"type": "SUBMIT_REPORT",
-                          "anomaly_type": "proxy_discrimination",
-                          "primary_evidence_chain": [],
-                          "affected_demographic": "unknown",
-                          "recommended_action": "audit"}
-            action_text = json.dumps(action)
-            obs_text = ""
-
-        _obs, reward, done, info = _env.step(action)
-        _render = _env.render()
-        _agent_history.append({"obs_text": obs_text, "action_text": action_text})
-
-        status = (
-            f"**Step {step + 1}/20 | Reward: {reward:+.2f}**\n\n"
-            f"`{action_text[:100]}{'…' if len(action_text) > 100 else ''}`"
-        )
-        if done:
-            ep_r = info.get("episode_reward", {})
-            terminal = ep_r.get("terminal", {})
-            status += (
-                f"\n\n✅ **Episode done!** Terminal reward: "
-                f"{terminal.get('terminal_total', 0):.2f}"
-            )
-
-        yield draw_graph(_render), format_claim_chain(_render), draw_reward_panel(_render), status
-
-        if done:
-            break
-        time.sleep(0.05)   # tiny pause so Gradio can flush the frame
-
-
 def new_episode(level: int):
     global _env, _obs, _render, _last_result
     _get_env(level=int(level))
@@ -679,22 +502,13 @@ select, .wrap { background: #0f172a !important; color: #e2e8f0 !important; }
 
 
 def build_demo() -> gr.Blocks:
-    has_model = _model is not None
-
     with gr.Blocks(
         theme=gr.themes.Base(
             primary_hue="blue",
             neutral_hue="slate",
             font=gr.themes.GoogleFont("Inter"),
         ),
-        css="""
-        body { background: #0f172a; }
-        .gradio-container { background: #0f172a !important; }
-        h1, h2, h3, label { color: #e2e8f0 !important; }
-        .model-badge { background: #1e293b; border: 1px solid #334155;
-                       border-radius: 6px; padding: 6px 12px;
-                       font-family: monospace; font-size: 13px; color: #94a3b8; }
-        """,
+        css=CSS,
         title="ARBITER — AI Oversight Training Environment",
     ) as demo:
 
@@ -703,18 +517,7 @@ def build_demo() -> gr.Blocks:
             "_Autonomous Reasoning-Based Inspector for Training Environments with Recursive Oversight_"
         )
 
-        # Model status badge
-        gr.HTML(
-            f"<div class='model-badge'>🤖 Model: <b>{_model_label}</b></div>"
-        )
-
         with gr.Tabs():
-            # ── Tab 1: Live Episode ──────────────────────────────────────────
-            with gr.Tab("🔬 Live Episode"):
-                with gr.Row():
-                    level_slider = gr.Slider(1, 7, value=args.level, step=1,
-                                             label="Curriculum Level")
-                    start_btn    = gr.Button("▶ New Episode", variant="primary")
 
             # ── Tab 1: Live Episode ──────────────────────────────────────────
             with gr.Tab("Live Episode"):
@@ -769,71 +572,46 @@ def build_demo() -> gr.Blocks:
 
                 # Bottom row: claim chain + reward chart
                 with gr.Row():
-                    graph_plot   = gr.Plot(label="Causal Decision Graph")
-                    with gr.Column():
-                        claim_html   = gr.HTML(label="Claim Chain")
+                    with gr.Column(scale=5):
+                        gr.Markdown("### Claim Chain")
+                        claim_html = gr.HTML(format_claim_chain({}))
 
-                        # ── Agent controls ───────────────────────────────────
-                        with gr.Accordion(
-                            "🤖 Agent Controls"
-                            + (" (LoRA loaded)" if has_model else " (no checkpoint — heuristic)"),
-                            open=True
-                        ):
-                            with gr.Row():
-                                step_btn = gr.Button(
-                                    "⏭ Agent Step", variant="secondary",
-                                    elem_id="agent_step_btn"
-                                )
-                                run_btn = gr.Button(
-                                    "🚀 Run Full Episode (Auto)",
-                                    variant="primary" if has_model else "secondary",
-                                    elem_id="run_full_btn"
-                                )
-                            agent_status = gr.Markdown(
-                                "_Click 'Agent Step' or 'Run Full Episode' to let the "
-                                + ("trained model" if has_model else "heuristic agent")
-                                + " drive._"
-                            )
-
-                        # ── Manual query controls ────────────────────────────
-                        with gr.Accordion("🔧 Manual Query Controls", open=not has_model):
-                            with gr.Row():
-                                q_type = gr.Dropdown(
-                                    ["QUERY_RECORDS", "QUERY_FEATURE_DISTRIBUTION",
-                                     "QUERY_COUNTERFACTUAL"],
-                                    label="Query Type", value="QUERY_RECORDS"
-                                )
-                                p1 = gr.Textbox(
-                                    label="Param 1 (outcome / feature_id / record_id)", value=""
-                                )
-                                p2 = gr.Textbox(label="Param 2 (group_by)", value="")
-                                q_btn = gr.Button("Run Query", variant="secondary")
-
-                reward_plot = gr.Plot(label="Reward Breakdown")
+                    with gr.Column(scale=5):
+                        reward_plot = gr.Plot(label="Reward Breakdown", show_label=True)
 
                 # ── Event wiring ─────────────────────────────────────────────
-                start_btn.click(
-                    new_episode, inputs=[level_slider],
-                    outputs=[graph_plot, claim_html, reward_plot]
-                )
-                q_btn.click(
-                    run_query, inputs=[q_type, p1, p2],
-                    outputs=[graph_plot, claim_html, reward_plot]
-                )
-                step_btn.click(
-                    run_agent_step,
-                    outputs=[graph_plot, claim_html, reward_plot, agent_status]
-                )
-                run_btn.click(
-                    run_full_episode, inputs=[level_slider],
-                    outputs=[graph_plot, claim_html, reward_plot, agent_status]
+
+                # Template loader — update JSON + description when type changes
+                action_type.change(
+                    load_template,
+                    inputs=[action_type],
+                    outputs=[action_json, action_desc],
                 )
 
-                demo.load(lambda: new_episode(args.level),
-                          outputs=[graph_plot, claim_html, reward_plot])
+                _all_outputs = [
+                    graph_plot, claim_html, reward_plot,
+                    result_html, stats_html, status_md,
+                ]
+
+                exec_btn.click(
+                    execute_action,
+                    inputs=[action_json],
+                    outputs=_all_outputs,
+                )
+
+                start_btn.click(
+                    new_episode,
+                    inputs=[level_slider],
+                    outputs=_all_outputs,
+                )
+
+                demo.load(
+                    lambda: new_episode(3),
+                    outputs=_all_outputs,
+                )
 
             # ── Tab 2: Arms Race ─────────────────────────────────────────────
-            with gr.Tab("📈 Arms Race"):
+            with gr.Tab("Arms Race"):
                 gr.Markdown("### Auditor Reward vs Defender Evasion Rate over Training")
                 arms_plot   = gr.Plot(label="Arms Race Co-Evolution")
                 refresh_btn = gr.Button("Refresh")
@@ -903,16 +681,9 @@ def build_demo() -> gr.Blocks:
 
 
 def main():
-    global _model_label
-
-    if args.checkpoint:
-        _model_label = _load_checkpoint(args.checkpoint)
-    else:
-        _model_label = "Manual mode (no checkpoint — use --checkpoint lora_grpo/ to load model)"
-
-    _get_env(level=args.level)
+    _get_env(level=3)
     demo = build_demo()
-    demo.launch(share=args.share, server_name="0.0.0.0", server_port=args.port)
+    demo.launch(share=False, server_name="0.0.0.0", server_port=7860)
 
 
 if __name__ == "__main__":
