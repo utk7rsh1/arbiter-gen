@@ -1,3 +1,21 @@
+---
+title: "ARBITER — AI Oversight Research Terminal"
+emoji: 🔍
+colorFrom: blue
+colorTo: purple
+sdk: docker
+app_port: 7860
+pinned: true
+license: mit
+short_description: "Co-evolutionary AI auditing: train an LLM to catch hidden anomalies in AI decision systems"
+tags:
+  - reinforcement-learning
+  - ai-safety
+  - causal-reasoning
+  - multi-agent
+  - hackathon
+---
+
 # ARBITER
 
 > **Autonomous Reasoning-Based Inspector for Training Environments with Recursive Oversight**

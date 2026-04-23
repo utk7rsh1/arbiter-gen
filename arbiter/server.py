@@ -17,9 +17,12 @@ Usage:
 """
 from __future__ import annotations
 
+import os
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import Any, Dict, List, Optional
 import time
@@ -46,6 +49,16 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ── Static frontend ──────────────────────────────────────────────────────────
+_FRONTEND_DIR = os.path.join(os.path.dirname(__file__), "demo", "frontend")
+if os.path.isdir(_FRONTEND_DIR):
+    app.mount("/static", StaticFiles(directory=_FRONTEND_DIR), name="static")
+
+    @app.get("/", include_in_schema=False)
+    def serve_frontend():
+        """Serve the React frontend index.html."""
+        return FileResponse(os.path.join(_FRONTEND_DIR, "index.html"))
 
 _global_start = time.time()
 _global_stats: Dict[str, Any] = {
