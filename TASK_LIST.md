@@ -158,7 +158,31 @@
 - [x] **Right panel:** Claim chain appearing step by step, each claim highlighted green (correct) / red (incorrect) after verification
 - [x] **Bottom panel:** Running reward total with component breakdown
 - [x] **Separate tab:** Arms race dual-curve graph
-- [ ] **TODO: Launch and test** → `python -m arbiter.demo.app`
+- [x] **Wire LoRA checkpoint** → `app.py` now accepts `--checkpoint <path>` (Unsloth or PeftModel fallback)
+- [x] **Agent mode added** → "Agent Step" and "Run Full Episode" buttons drive the trained model through the env and stream claim/reward updates live
+- [ ] **TODO: Launch and test** → `python -m arbiter.demo.app --checkpoint lora_grpo/`
+
+---
+
+### 25. LoRA Checkpoint Integration into Gradio Demo
+- [x] Add `--checkpoint` CLI arg to `arbiter/demo/app.py`
+- [x] Load LoRA adapter at startup: Unsloth path (GPU) with graceful fallback to `transformers + PeftModel` (CPU)
+- [x] Expose loaded model in header badge so judges can confirm which checkpoint is running
+- [x] **"⏭ Agent Step" button** — calls `_generate_llm_action()` for one step and streams graph + claim + reward panel
+- [x] **"🚀 Run Full Episode" button** — runs the model autonomously for up to 20 steps, yields intermediate frames to Gradio
+- [x] History context window (last 6 turns) passed to model so it reasons across steps
+- [x] Demo still works in manual-query mode when no `--checkpoint` is given (backward compat)
+
+---
+
+### 26. End-to-End Integration Test (`integration_test.py`)
+- [x] **Stage 1 — Environment:** reset, all 4 query action types, render() structure, full Level-1 episode, `validate.py` (70/70)
+- [x] **Stage 2 — SFT checkpoint (FIX-1+2):** 10 held-out seeds (was 3); fullschema validation (required fields, enum values per claim type) replacing bare JSON check; action-type coverage check (CLAIM_CAUSAL / QUERY_CF / SUBMIT_REPORT must all appear)
+- [x] **Stage 3 — GRPO checkpoint (FIX-1):** 10 held-out seeds (was 3); mean ± std vs SFT mean; schema validity on GRPO outputs too
+- [x] **Stage 4 — Gradio demo functional test (FIX-3):** port reachable → uses `gradio_client` to (a) verify model badge text contains checkpoint name not 'Manual mode', (b) call `new_episode()` and assert graph payload non-null, (c) call `run_query()` and assert reward panel updates, (d) verify claim HTML contains `#4ade80`/`#f87171` color markers
+- [x] Graceful shutdown in `finally` block so demo process is always cleaned up
+- [x] Structured PASS/FAIL/WARN/SKIP summary table; exits 0 if no FAILs, exits 1 otherwise
+- [x] Works pre-training: `python integration_test.py` runs Stage 1 + Stage 4 (no-checkpoint mode)
 
 ---
 
@@ -272,6 +296,8 @@
 | 4-plot visualization suite | `arbiter/training/visualize.py` | ✅ |
 | Demo plots generated | `results/plots/` | ✅ |
 | Gradio demo interface | `arbiter/demo/app.py` | ✅ |
+| **LoRA checkpoint wired into demo** (Task 25) | `arbiter/demo/app.py` | ✅ |
+| **End-to-end integration test** (Task 26) | `integration_test.py` | ✅ |
 | 10-episode validation (70/70 pass) | `validate.py` | ✅ |
 | Knowledge graph | `graphify-out/graph.html` | ✅ |
 
@@ -286,7 +312,7 @@
 | **RUN** three-condition evaluation (`evaluate.py`) | Kabir | April 26 |
 | Pitch deck (11 slides, embed `results/plots/`) | Utkarsh | April 24 |
 | HuggingFace Space deployment | Utkarsh | April 25 |
-| Test + launch Gradio demo (`python -m arbiter.demo.app`) | Utkarsh | April 25 |
+| Test + launch Gradio demo (`python -m arbiter.demo.app --checkpoint lora_grpo/`) | Utkarsh | April 25 |
 | Backup screen recordings | Utkarsh | April 26 |
 
 ---

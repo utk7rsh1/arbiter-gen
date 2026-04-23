@@ -1,0 +1,80 @@
+# ── ARBITER Docker image exclusions ───────────────────────────────────────────
+# Files and directories listed here are NOT copied into the Docker image.
+# Goal: keep the image small (<250 MB) and exclude dev/training-only artifacts.
+
+# ── Git ───────────────────────────────────────────────────────────────────────
+.git
+.gitignore
+.gitattributes
+
+# ── Python cache ──────────────────────────────────────────────────────────────
+__pycache__
+**/__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info
+dist/
+build/
+.eggs/
+
+# ── Virtual environments ──────────────────────────────────────────────────────
+.venv
+venv
+env
+.env
+
+# ── Trained model checkpoints (can be 1–10 GB each) ─────────────────────────
+# These are downloaded from HuggingFace Hub at inference time, not baked in.
+lora_sft/
+lora_grpo/
+lora_ablation/
+*.safetensors
+*.bin
+adapter_model.*
+adapter_config.json
+
+# ── Training data ─────────────────────────────────────────────────────────────
+data/
+*.jsonl
+*.json.gz
+
+# ── Results / generated plots ─────────────────────────────────────────────────
+# Static plot PNGs are large; embed them via HF Hub links in the frontend instead
+results/
+
+# ── Dev / test / validation scripts ──────────────────────────────────────────
+# Not needed at runtime — reduce attack surface and image size
+integration_test.py
+test_steps.py
+validate.py
+
+# ── Documentation and planning docs (not needed in container) ────────────────
+# README.md is intentionally NOT excluded — HF Spaces reads it for metadata
+ARBITER_Frontend_Plan.md
+ARBITER_Frontend_Redesign_v2.md
+Arbiter-IDEA.txt
+
+# ── Knowledge graph output (large HTML) ──────────────────────────────────────
+graphify-out/
+
+# ── Editor / IDE artifacts ────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ── CI / CD ───────────────────────────────────────────────────────────────────
+.agents/
+.github/
+
+# ── Logs ─────────────────────────────────────────────────────────────────────
+logs/
+*.log
+
+# ── Full requirements (Docker uses requirements-server.txt instead) ───────────
+# Keep requirements.txt in the image for reference / transparency — don't exclude it.
+# The Dockerfile explicitly installs requirements-server.txt, not requirements.txt.
