@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(py -3.13 -m pip list)",
+      "Bash(py -3.13 -c \"import torch; print\\('torch', torch.__version__\\)\")",
+      "Bash(pip install *)"
+    ]
+  }
+}

@@ -1,17 +1,9 @@
-"""ARBITER Gradio Demo Interface.
-
-Panels:
-  Top:    Stats bar — step / budget / reward / claims / level
-  Middle: Causal graph | Action panel (all 8 types) | Last result
-  Bottom: Claim chain | Reward breakdown
-  Tab 2:  Arms race dual-curve graph
-
-Usage:
-    python -m arbiter.demo.app
-"""
+"""ARBITER Gradio Demo — Live episode + GRPO Training Monitor."""
 import sys
 import json
-import textwrap
+import copy
+import subprocess
+import threading
 from pathlib import Path
 
 import gradio as gr
@@ -20,670 +12,942 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import networkx as nx
-import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from arbiter.env.environment import ArbiterEnv
 
-# ── Global state ───────────────────────────────────────────────────────────────
+# ── Paths ──────────────────────────────────────────────────────────────────────
+ROOT     = Path(__file__).parent.parent.parent
+GRPO_LOG = ROOT / "logs" / "grpo_training.jsonl"
 
-_env: ArbiterEnv = None
-_obs = None
-_render = None
-_last_result = None
-_arms_race_data = {"auditor": [], "defender": []}
+# ── Scripted action sequence (mirrors useEpisode.js _getScriptedAction) ────────
+SCRIPTED_ACTIONS = [
+    {"type": "QUERY_RECORDS", "feature_filter": {}, "outcome_filter": "denied", "time_range": None},
+    {"type": "QUERY_FEATURE_DISTRIBUTION", "feature_id": "zip_code_cluster", "group_by": "loan_outcome"},
+    {"type": "CLAIM_CAUSAL", "claim": {
+        "cause_feature": "zip_code_cluster", "effect_outcome": "denial_rate_overall",
+        "mechanism": "internal_risk_score", "direction": "positive", "confidence": "HIGH",
+        "basis_records": ["rec_001", "rec_007", "rec_012"], "anomaly_type": "proxy_discrimination",
+    }},
+    {"type": "QUERY_COUNTERFACTUAL", "record_id": "rec_001", "feature_id": "zip_code_cluster", "counterfactual_value": 3},
+    {"type": "CLAIM_COUNTERFACTUAL", "claim": {
+        "subject_record": "rec_001", "counterfactual_feature": "zip_code_cluster",
+        "predicted_outcome_change": "approved", "confidence": "HIGH", "basis": "cf_query_step_3",
+    }},
+    {"type": "QUERY_FEATURE_DISTRIBUTION", "feature_id": "credit_score", "group_by": "zip_code_cluster"},
+    {"type": "CLAIM_CAUSAL", "claim": {
+        "cause_feature": "zip_code_cluster", "effect_outcome": "internal_risk_score",
+        "mechanism": "proxy_laundering", "direction": "positive", "confidence": "HIGH",
+        "basis_records": ["rec_001", "rec_007", "rec_012", "rec_019"], "anomaly_type": "proxy_discrimination",
+    }},
+    {"type": "FLAG_HYPOTHESIS", "hypothesis_type": "proxy_discrimination", "status": "CONFIRMED"},
+    {"type": "FLAG_HYPOTHESIS", "hypothesis_type": "model_drift", "status": "ELIMINATED"},
+    {"type": "CLAIM_THEORY_OF_MIND", "claim": {
+        "defender_action": "obfuscating", "target_link": "zip_code_cluster->internal_risk_score",
+        "obfuscation_method": "timestamp_manipulation", "confidence": "HIGH",
+        "basis": "timestamp_clustering_around_denial_events",
+    }},
+    {"type": "QUERY_COUNTERFACTUAL", "record_id": "rec_007", "feature_id": "zip_code_cluster", "counterfactual_value": 1},
+    {"type": "SUBMIT_REPORT",
+        "anomaly_type": "proxy_discrimination",
+        "primary_evidence_chain": ["zip_code_cluster", "internal_risk_score", "denial_rate_overall"],
+        "affected_demographic": "zip_code_cluster_7",
+        "recommended_action": "audit_risk_score_model",
+    },
+]
 
-# ── Action templates shown in the JSON editor ──────────────────────────────────
+# ── Episode global state ────────────────────────────────────────────────────────
+_env            = None
+_obs            = None
+_render         = None
+_step_index     = 0
+_claims         = []
+_hypotheses     = {
+    "proxy_discrimination":  "ACTIVE",
+    "adversarial_injection": "ACTIVE",
+    "model_drift":           "ACTIVE",
+}
+_budget              = 20
+_reward_total        = 0.0
+_reward_components   = {"claim": 0.0, "counterfactual": 0.0, "tom": 0.0,
+                         "chain": 0.0, "consistency": 0.0, "budget": 0.0}
+_episode_done        = False
+_verdict_correct     = None
+_current_level       = 3
 
-ACTION_TEMPLATES = {
-    "QUERY_RECORDS": json.dumps({
-        "type": "QUERY_RECORDS",
-        "feature_filter": {},
-        "outcome_filter": None,
-        "time_range": None,
-    }, indent=2),
+# ── Training global state ───────────────────────────────────────────────────────
+_training_process = None
+_log_buffer       = []
 
-    "QUERY_FEATURE_DISTRIBUTION": json.dumps({
-        "type": "QUERY_FEATURE_DISTRIBUTION",
-        "feature_id": "zip_code_cluster",
-        "group_by": None,
-    }, indent=2),
+# ── CSS ─────────────────────────────────────────────────────────────────────────
+CSS = """
+*, *::before, *::after { box-sizing: border-box; }
+body, .gradio-container, .main, footer { background: #020617 !important; color: #f1f5f9 !important; }
+.gradio-container { max-width: 1400px !important; margin: 0 auto !important; }
 
-    "QUERY_COUNTERFACTUAL": json.dumps({
-        "type": "QUERY_COUNTERFACTUAL",
-        "record_id": "rec_0000",
-        "feature_id": "zip_code_cluster",
-        "counterfactual_value": "cluster_3",
-    }, indent=2),
-
-    "FLAG_HYPOTHESIS": json.dumps({
-        "type": "FLAG_HYPOTHESIS",
-        "hypothesis_type": "decoy_a",
-        "status": "DISMISSED",
-    }, indent=2),
-
-    "CLAIM_CAUSAL": json.dumps({
-        "type": "CLAIM_CAUSAL",
-        "claim": {
-            "cause_feature":  "zip_code_cluster",
-            "effect_outcome": "loan_denied",
-            "mechanism":      "internal_risk_score",
-            "direction":      "positive",
-            "confidence":     "MEDIUM",
-            "basis_records":  ["rec_0000", "rec_0001"],
-            "anomaly_type":   "proxy_discrimination",
-        },
-    }, indent=2),
-
-    "CLAIM_COUNTERFACTUAL": json.dumps({
-        "type": "CLAIM_COUNTERFACTUAL",
-        "claim": {
-            "subject_record":           "rec_0000",
-            "counterfactual_feature":   "zip_code_cluster",
-            "predicted_outcome_change": "approved",
-            "confidence":               "MEDIUM",
-            "basis":                    "distribution shift observed",
-        },
-    }, indent=2),
-
-    "CLAIM_THEORY_OF_MIND": json.dumps({
-        "type": "CLAIM_THEORY_OF_MIND",
-        "claim": {
-            "defender_action":    "obfuscating",
-            "target_link":        "zip_code_cluster→internal_risk_score",
-            "obfuscation_method": "link_substitution",
-            "confidence":         "MEDIUM",
-            "basis":              "unexpected edge weight in graph",
-        },
-    }, indent=2),
-
-    "SUBMIT_REPORT": json.dumps({
-        "type":                   "SUBMIT_REPORT",
-        "anomaly_type":           "proxy_discrimination",
-        "primary_evidence_chain": ["zip_code_cluster", "internal_risk_score", "loan_denied"],
-        "affected_demographic":   "cluster_7",
-        "recommended_action":     "audit",
-    }, indent=2),
+.arbiter-header {
+    background: linear-gradient(135deg, #0f172a 0%, #0c1a3a 50%, #0f172a 100%);
+    border: 1px solid #1e3a6e; border-radius: 14px;
+    padding: 24px 32px; margin-bottom: 16px;
+    position: relative; overflow: hidden;
+}
+.arbiter-header::before {
+    content: ''; position: absolute; top: -50%; left: -50%;
+    width: 200%; height: 200%;
+    background: radial-gradient(ellipse at 30% 50%, rgba(59,130,246,0.08) 0%, transparent 60%),
+                radial-gradient(ellipse at 70% 50%, rgba(139,92,246,0.06) 0%, transparent 60%);
+    pointer-events: none;
+}
+.arbiter-title {
+    font-size: 2rem; font-weight: 900; letter-spacing: -0.5px;
+    background: linear-gradient(90deg, #60a5fa, #a78bfa, #34d399);
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    background-clip: text; margin: 0 0 4px 0;
+}
+.arbiter-subtitle { color: #64748b; font-size: 0.8rem; letter-spacing: 0.5px; text-transform: uppercase; margin: 0; }
+.arbiter-badge {
+    display: inline-block; background: #0f2a4a; border: 1px solid #1e4a8a;
+    color: #60a5fa; font-size: 10px; font-weight: 700; letter-spacing: 1px;
+    padding: 3px 8px; border-radius: 4px; text-transform: uppercase;
 }
 
-ACTION_DESCRIPTIONS = {
-    "QUERY_RECORDS":              "Retrieve raw records. Costs 1 budget. Filter by feature, outcome, or time window.",
-    "QUERY_FEATURE_DISTRIBUTION": "Histogram of a feature's values. Costs 1 budget. Optionally group by another feature.",
-    "QUERY_COUNTERFACTUAL":       "Ask 'what if feature X were Y on record Z?'. Costs 2 budget. Run before CLAIM_COUNTERFACTUAL.",
-    "FLAG_HYPOTHESIS":            "Mark a hypothesis as ACTIVE or DISMISSED. Free action. Use for decoy_a / decoy_b.",
-    "CLAIM_CAUSAL":               "Assert a cause→effect link. Verified against ground truth immediately.",
-    "CLAIM_COUNTERFACTUAL":       "Predict outcome under intervention. Pays 2× reward. Requires prior QUERY_COUNTERFACTUAL.",
-    "CLAIM_THEORY_OF_MIND":       "Accuse Defender of obfuscation. Level 4+ only. +3 bonus if fully correct.",
-    "SUBMIT_REPORT":              "Terminal action — end episode and collect final reward.",
+.tab-nav { background: #0f172a !important; border-bottom: 1px solid #1e293b !important; }
+.tab-nav button { color: #64748b !important; font-weight: 500 !important; }
+.tab-nav button.selected { color: #60a5fa !important; border-bottom: 2px solid #3b82f6 !important; }
+
+.block { background: #0f172a !important; border: 1px solid #1e293b !important; border-radius: 10px !important; }
+.label-wrap span { color: #94a3b8 !important; font-size: 11px !important; font-weight: 600 !important;
+    letter-spacing: 0.5px !important; text-transform: uppercase !important; }
+
+textarea, input[type=text], input[type=number] {
+    background: #020617 !important; color: #e2e8f0 !important;
+    border: 1px solid #334155 !important; border-radius: 8px !important;
+    font-family: 'JetBrains Mono', 'Fira Code', monospace !important; font-size: 12px !important;
+}
+textarea:focus, input:focus { border-color: #3b82f6 !important; box-shadow: 0 0 0 2px rgba(59,130,246,0.15) !important; }
+
+button.primary { background: linear-gradient(135deg, #1d4ed8, #2563eb) !important; border: none !important;
+    color: white !important; font-weight: 600 !important; border-radius: 8px !important; transition: all 0.2s !important; }
+button.primary:hover { background: linear-gradient(135deg, #2563eb, #3b82f6) !important;
+    box-shadow: 0 0 16px rgba(59,130,246,0.3) !important; transform: translateY(-1px) !important; }
+button.secondary { background: #1e293b !important; border: 1px solid #334155 !important;
+    color: #94a3b8 !important; border-radius: 8px !important; }
+button.stop { background: linear-gradient(135deg, #7f1d1d, #991b1b) !important; border: none !important;
+    color: white !important; font-weight: 600 !important; border-radius: 8px !important; }
+
+select, .wrap { background: #0f172a !important; color: #e2e8f0 !important; border-color: #334155 !important; }
+input[type=range] { accent-color: #3b82f6; }
+
+.stats-bar {
+    display: flex; flex-wrap: wrap; gap: 8px;
+    background: #0a1628; border: 1px solid #1e3a6e;
+    border-radius: 10px; padding: 10px 14px; margin: 8px 0;
+}
+.stat-pill {
+    background: #0f172a; border: 1px solid #1e293b;
+    border-radius: 8px; padding: 6px 14px;
+    display: flex; flex-direction: column; align-items: center; min-width: 80px;
+}
+.stat-label { color: #475569; font-size: 9px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; margin-bottom: 2px; }
+.stat-value { font-size: 18px; font-weight: 800; font-family: monospace; }
+
+.training-log {
+    background: #020617; border: 1px solid #1e293b; border-radius: 8px;
+    padding: 12px; font-family: 'JetBrains Mono', monospace; font-size: 11px;
+    color: #94a3b8; max-height: 320px; overflow-y: auto; line-height: 1.6;
+}
+.status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+.status-dot.active { background: #4ade80; box-shadow: 0 0 6px #4ade80; animation: pulse 1.5s infinite; }
+.status-dot.idle { background: #475569; }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+.plot-container { background: #0f172a !important; border-radius: 10px !important; }
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: #0f172a; }
+::-webkit-scrollbar-thumb { background: #334155; border-radius: 2px; }
+"""
+
+# ── Header ──────────────────────────────────────────────────────────────────────
+HEADER_HTML = """
+<div class="arbiter-header">
+  <div style="display:flex; align-items:center; gap:16px; flex-wrap:wrap;">
+    <div>
+      <h1 class="arbiter-title">ARBITER</h1>
+      <p class="arbiter-subtitle">Autonomous Reasoning-Based Inspector &nbsp;·&nbsp;
+         Training Environments with Recursive Oversight</p>
+    </div>
+    <div style="margin-left:auto; display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+      <span class="arbiter-badge">Multi-Agent</span>
+      <span class="arbiter-badge">Causal RL</span>
+      <span class="arbiter-badge">Scalable Oversight</span>
+    </div>
+  </div>
+</div>
+"""
+
+# ── Hypothesis HTML ─────────────────────────────────────────────────────────────
+_HYP_LABELS = {
+    "proxy_discrimination":  "PROXY DISCRIM.",
+    "adversarial_injection": "ADV. INJECTION",
+    "model_drift":           "MODEL DRIFT",
 }
 
-# ── Environment helpers ────────────────────────────────────────────────────────
-
-def _get_env(level: int = 3) -> ArbiterEnv:
-    global _env, _obs, _render, _last_result
-    _env = ArbiterEnv(level=level)
-    _obs = _env.reset()
-    _render = _env.render()
-    _last_result = None
-    return _env
-
-
-def _stats_html() -> str:
-    if _render is None:
-        return "<div class='stats-bar'>No episode active.</div>"
-
-    step    = _render.get("step", 0)
-    budget  = _render.get("budget_remaining", 0)
-    reward  = _render.get("running_reward", 0.0)
-    claims  = len(_render.get("claims", []))
-    level   = _obs.get("level", "?") if _obs else "?"
-    flags   = _render.get("hypothesis_flags", {})
-
-    def pill(label, value, color):
+def _hyp_html(hyp: dict) -> str:
+    def card(k, status):
+        label  = _HYP_LABELS.get(k, k.upper())
+        status = (status or "ACTIVE").upper()
+        if   status == "CONFIRMED":  dot, sl = "#4ade80", "Confirmed"
+        elif status == "ACTIVE":     dot, sl = "#fbbf24", "Active"
+        elif status == "WEAKENED":   dot, sl = "#f97316", "Weakened"
+        else:                        dot, sl = "#475569", "Eliminated"
+        strike  = "text-decoration:line-through;" if status == "ELIMINATED" else ""
+        glow    = f"box-shadow:0 0 8px {dot};" if status in ("ACTIVE", "CONFIRMED") else ""
+        border  = "#4ade80" if status == "CONFIRMED" else "#1e293b"
+        weight  = "700" if status in ("ACTIVE", "CONFIRMED") else "400"
         return (
-            f"<div style='background:{color}22; border:1px solid {color}55; "
-            f"border-radius:6px; padding:4px 12px; display:inline-block; margin:0 4px;'>"
-            f"<span style='color:#94a3b8; font-size:11px;'>{label}</span><br>"
-            f"<span style='color:{color}; font-size:16px; font-weight:700;'>{value}</span>"
-            f"</div>"
+            f"<div style='flex:1;background:#0f172a;border:1px solid {border};"
+            f"border-radius:8px;padding:12px;'>"
+            f"<div style='font-size:9px;color:#475569;letter-spacing:1px;margin-bottom:5px;font-weight:600;'>"
+            f"{k[:3].upper()}</div>"
+            f"<div style='font-size:12px;color:#e2e8f0;font-weight:600;margin-bottom:8px;{strike}'>{label}</div>"
+            f"<div style='display:flex;align-items:center;gap:6px;'>"
+            f"<span style='width:7px;height:7px;border-radius:50%;background:{dot};{glow}display:inline-block;'></span>"
+            f"<span style='font-size:11px;color:{dot};font-weight:{weight};'>{sl}</span>"
+            f"</div></div>"
         )
-
-    flag_str = " | ".join(f"{k}:{v}" for k, v in flags.items()) if flags else "none"
-    reward_color = "#4ade80" if reward >= 0 else "#f87171"
-
+    cards = "".join(card(k, v) for k, v in hyp.items())
     return (
-        "<div style='background:#0f172a; padding:10px 16px; border-radius:8px; "
-        "border:1px solid #1e293b; margin-bottom:8px;'>"
-        + pill("Step",    step,   "#60a5fa")
-        + pill("Budget",  budget, "#fbbf24")
-        + pill("Reward",  f"{reward:+.2f}", reward_color)
-        + pill("Claims",  claims, "#a78bfa")
-        + pill("Level",   level,  "#34d399")
-        + f"<span style='color:#475569; font-size:11px; margin-left:12px;'>Flags: {flag_str}</span>"
+        "<div style='background:#0f172a;border:1px solid #1e293b;border-radius:10px;padding:12px;'>"
+        "<div style='font-size:9px;color:#475569;letter-spacing:1px;font-weight:700;"
+        "text-transform:uppercase;margin-bottom:10px;'>Hypothesis Tracker</div>"
+        f"<div style='display:flex;gap:8px;'>{cards}</div></div>"
+    )
+
+
+# ── Reward HTML ─────────────────────────────────────────────────────────────────
+def _reward_html(rc: dict, done: bool, verdict: bool | None) -> str:
+    total = sum(rc.values())
+    comps = [
+        ("claim",          "Claim Reward",   12, "#00c4e0"),
+        ("counterfactual", "Counterfactual",  6, "#a78bfa"),
+        ("tom",            "Theory of Mind",  3, "#a78bfa"),
+        ("chain",          "Chain Bonus",     8, "#4ade80"),
+        ("consistency",    "Consistency",     3, "#f87171"),
+        ("budget",         "Budget Eff.",     4, "#00c4e0"),
+    ]
+    def bar(key, label, mx, color):
+        val  = rc.get(key, 0.0)
+        pct  = min(100, abs(val / mx) * 100) if mx else 0
+        neg  = val < 0
+        bc   = "#f87171" if neg else color
+        sign      = "" if neg else "+"
+        val_color = "#f87171" if neg else "#e2e8f0"
+        return (
+            f"<div style='margin-bottom:9px;'>"
+            f"<div style='display:flex;justify-content:space-between;margin-bottom:3px;'>"
+            f"<span style='font-size:10px;color:#64748b;'>{label}</span>"
+            f"<span style='font-size:10px;font-family:monospace;color:{val_color};'>"
+            f"{sign}{val:.1f} / {mx:.1f}</span></div>"
+            f"<div style='height:4px;background:#1e293b;border-radius:2px;'>"
+            f"<div style='height:100%;width:{pct:.1f}%;background:{bc};border-radius:2px;"
+            f"transition:width 0.4s ease;'></div></div></div>"
+        )
+    bars = "".join(bar(*c) for c in comps)
+    score_color = ("#4ade80" if verdict else "#f87171") if done else ("#00c4e0" if total > 10 else "#e2e8f0")
+    badge = ""
+    if done and verdict is not None:
+        bg  = "rgba(16,185,129,0.08)" if verdict else "rgba(239,68,68,0.08)"
+        bc2 = "#4ade80" if verdict else "#f87171"
+        txt = "VERDICT CORRECT" if verdict else "VERDICT WRONG"
+        badge = (
+            f"<div style='margin-top:8px;padding:3px 10px;border-radius:12px;"
+            f"background:{bg};border:1px solid {bc2};font-size:9px;color:{bc2};"
+            f"font-family:monospace;text-align:center;'>{txt}</div>"
+        )
+    return (
+        "<div style='background:#0f172a;border:1px solid #1e293b;border-radius:10px;"
+        "padding:14px;margin-top:8px;'>"
+        "<div style='font-size:9px;color:#475569;letter-spacing:1px;font-weight:700;"
+        "text-transform:uppercase;margin-bottom:12px;'>Reward Breakdown</div>"
+        "<div style='display:flex;gap:14px;'>"
+        "<div style='flex:0 0 90px;display:flex;flex-direction:column;align-items:center;justify-content:center;'>"
+        "<div style='font-size:9px;color:#475569;letter-spacing:1px;text-transform:uppercase;margin-bottom:4px;'>Total</div>"
+        f"<div style='font-size:38px;font-weight:800;font-family:monospace;color:{score_color};line-height:1;'>{total:.1f}</div>"
+        "<div style='font-size:11px;color:#475569;font-family:monospace;'>/ 35.0</div>"
+        f"{badge}</div>"
+        "<div style='width:1px;background:#1e293b;align-self:stretch;'></div>"
+        f"<div style='flex:1;'>{bars}</div></div></div>"
+    )
+
+
+# ── Bottom stats bar ────────────────────────────────────────────────────────────
+def _bottom_stats(step: int, budget: int, reward: float, claims: list, level: str) -> str:
+    total  = len(claims)
+    correct = sum(1 for c in claims if c.get("correct"))
+    acc    = round(correct / total * 100) if total else 0
+    bpct   = budget / 20
+    bc     = "#4ade80" if bpct > 0.6 else ("#fbbf24" if bpct > 0.3 else "#f87171")
+    rc     = "#4ade80" if reward >= 0 else "#f87171"
+    def pill(lbl, val, col):
+        return (
+            f"<div class='stat-pill' style='border-color:{col}22;'>"
+            f"<span class='stat-label'>{lbl}</span>"
+            f"<span class='stat-value' style='color:{col};'>{val}</span></div>"
+        )
+    return (
+        "<div class='stats-bar'>"
+        + pill("Step",     f"{step}/20",    "#60a5fa")
+        + pill("Budget",   str(budget),     bc)
+        + pill("Reward",   f"{reward:+.2f}", rc)
+        + pill("Claims",   str(total),      "#a78bfa")
+        + pill("Accuracy", f"{acc}%",       "#34d399")
+        + pill("Level",    level,           "#34d399")
         + "</div>"
     )
 
 
-# ── Graph ──────────────────────────────────────────────────────────────────────
-
-def draw_graph(render_data: dict) -> plt.Figure:
-    fig, ax = plt.subplots(figsize=(7, 5))
-    fig.patch.set_facecolor("#0f172a")
-    ax.set_facecolor("#0f172a")
-
-    if not render_data or not render_data.get("graph_nodes"):
-        ax.text(0.5, 0.5, "Start an episode to see the graph.",
-                color="#475569", ha="center", va="center", transform=ax.transAxes, fontsize=11)
-        ax.axis("off")
-        return fig
-
-    G = nx.DiGraph()
-    for node in render_data["graph_nodes"]:
-        G.add_node(node["id"], **node)
-    for edge in render_data["graph_edges"]:
-        G.add_edge(edge["source"], edge["target"], **edge)
-
-    queried = set(render_data.get("queried_nodes", []))
-
-    colors = []
-    for n, d in G.nodes(data=True):
-        if n in queried:
-            colors.append("#fbbf24")
-        elif d.get("proxy"):
-            colors.append("#f87171")
-        elif d.get("node_type") == "outcome":
-            colors.append("#60a5fa")
-        elif d.get("node_type") == "policy":
-            colors.append("#a78bfa")
-        else:
-            colors.append("#4ade80")
-
-    try:
-        pos = nx.spring_layout(G, seed=42, k=2.0)
-    except Exception:
-        pos = nx.random_layout(G)
-
-    nx.draw_networkx(
-        G, pos=pos, ax=ax,
-        node_color=colors, node_size=500,
-        font_color="white", font_size=6, font_weight="bold",
-        edge_color="#334155", arrows=True, arrowsize=10,
-        width=1.0,
-    )
-
-    legend_patches = [
-        mpatches.Patch(color="#fbbf24", label="Queried"),
-        mpatches.Patch(color="#f87171", label="Proxy/Anomalous"),
-        mpatches.Patch(color="#60a5fa", label="Outcome"),
-        mpatches.Patch(color="#a78bfa", label="Policy"),
-        mpatches.Patch(color="#4ade80", label="Feature"),
-    ]
-    ax.legend(handles=legend_patches, loc="upper left",
-              facecolor="#1e293b", labelcolor="white", fontsize=7, framealpha=0.9)
-    ax.axis("off")
-    ax.set_title(
-        f"Causal Graph  |  {len(G.nodes)} nodes  {len(G.edges)} edges  "
-        f"|  {len(queried)} queried",
-        color="#94a3b8", fontsize=9, pad=6,
-    )
-    fig.tight_layout()
-    return fig
-
-
-# ── Claim chain ────────────────────────────────────────────────────────────────
-
-def format_claim_chain(render_data: dict) -> str:
-    claims  = render_data.get("claims", [])
-    rewards = render_data.get("claim_rewards", [])
-
+# ── Claims HTML ─────────────────────────────────────────────────────────────────
+def _claims_html(claims: list) -> str:
     if not claims:
         return (
-            "<div style='color:#475569; font-style:italic; font-size:12px; padding:8px;'>"
-            "No claims yet. Submit a CLAIM_* action to populate this panel.</div>"
+            "<div style='color:#334155;font-style:italic;font-size:12px;"
+            "padding:20px;text-align:center;background:#0f172a;"
+            "border:1px solid #1e293b;border-radius:10px;'>"
+            "No claims yet — the investigation will build them automatically.</div>"
         )
-
-    html = "<div style='font-family:monospace; font-size:11px; max-height:220px; overflow-y:auto;'>"
-    for i, (claim, r) in enumerate(zip(claims, rewards)):
-        color = "#4ade80" if r > 0 else "#f87171"
-        bg    = "#14532d" if r > 0 else "#450a0a"
-        ctype = claim.get("claim_type", "causal").upper()
+    html = (
+        "<div style='background:#0f172a;border:1px solid #1e293b;border-radius:10px;"
+        "padding:12px;max-height:340px;overflow-y:auto;'>"
+        "<div style='font-size:9px;color:#475569;letter-spacing:1px;font-weight:700;"
+        "text-transform:uppercase;margin-bottom:10px;'>Claim Chain</div>"
+    )
+    for c in claims:
+        ct      = c.get("claim_type", "causal").upper()
+        correct = c.get("correct", True)
+        rd      = c.get("reward_delta", 0.0)
+        col     = "#4ade80" if correct else "#f87171"
+        bg      = "rgba(20,83,45,0.35)" if correct else "rgba(69,10,10,0.35)"
+        step_n  = c.get("step", "?")
+        if c.get("claim_type") == "causal":
+            detail = (f"{c.get('cause_feature','?')} &rarr; {c.get('effect_outcome','?')} "
+                      f"via <em>{c.get('mechanism','?')}</em> [{c.get('confidence','?')}]")
+        elif c.get("claim_type") == "counterfactual":
+            detail = (f"If <em>{c.get('counterfactual_feature','?')}</em> changed on "
+                      f"{c.get('subject_record','?')} &rarr; {c.get('predicted_outcome_change','?')}")
+        else:
+            detail = (f"Defender {c.get('defender_action','?')} "
+                      f"<em>{c.get('target_link','?')}</em>")
         html += (
-            f"<div style='background:{bg}; border-left:3px solid {color}; "
-            f"padding:5px 8px; margin:3px 0; border-radius:4px;'>"
-            f"<b style='color:{color};'>[{ctype}]</b> "
-            f"<span style='color:#e2e8f0;'>{_format_claim_text(claim)}</span>"
-            f"<span style='color:{color}; float:right; font-weight:700;'>{r:+.2f}</span>"
-            f"</div>"
+            f"<div style='background:{bg};border-left:3px solid {col};"
+            f"padding:6px 10px;margin:4px 0;border-radius:0 6px 6px 0;font-size:11px;'>"
+            f"<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:2px;'>"
+            f"<span style='color:{col};font-weight:700;font-size:10px;letter-spacing:0.5px;'>"
+            f"[{ct}] step {step_n}</span>"
+            f"<span style='color:{col};font-weight:700;font-family:monospace;'>{rd:+.2f}</span></div>"
+            f"<span style='color:#cbd5e1;'>{detail}</span></div>"
         )
     html += "</div>"
     return html
 
 
-def _format_claim_text(claim: dict) -> str:
-    ctype = claim.get("claim_type", "causal")
-    if ctype == "causal":
-        return (
-            f"{claim.get('cause_feature','?')} → {claim.get('effect_outcome','?')} "
-            f"via {claim.get('mechanism','?')} [{claim.get('confidence','?')}]"
-        )
-    if ctype == "counterfactual":
-        return (
-            f"If {claim.get('counterfactual_feature','?')} changed on "
-            f"{claim.get('subject_record','?')} → {claim.get('predicted_outcome_change','?')}"
-        )
-    if ctype == "theory_of_mind":
-        return (
-            f"Defender {claim.get('defender_action','?')} "
-            f"{claim.get('target_link','?')} via {claim.get('obfuscation_method','?')}"
-        )
-    return json.dumps(claim)
-
-
-# ── Result panel ───────────────────────────────────────────────────────────────
-
-def format_result(result_obj) -> str:
-    if result_obj is None:
-        return (
-            "<div style='color:#475569; font-style:italic; font-size:12px; padding:8px;'>"
-            "Execute an action to see the result here.</div>"
-        )
-    try:
-        text = json.dumps(result_obj, indent=2, default=str)
-    except Exception:
-        text = str(result_obj)
-
-    lines = text.split("\n")
-    colored = []
-    for line in lines:
-        stripped = line.lstrip()
-        if stripped.startswith('"') and ":" in stripped:
-            key, _, rest = stripped.partition(":")
-            colored.append(
-                f"<span style='color:#94a3b8;'>{line[:len(line)-len(stripped)]}{key}:</span>"
-                f"<span style='color:#e2e8f0;'>{rest}</span>"
-            )
-        elif any(kw in stripped for kw in ["true", "false", "null"]):
-            colored.append(f"<span style='color:#fbbf24;'>{line}</span>")
-        elif stripped.startswith('"'):
-            colored.append(f"<span style='color:#86efac;'>{line}</span>")
+# ── Graph drawing ───────────────────────────────────────────────────────────────
+def draw_graph(render_data: dict) -> plt.Figure:
+    fig, ax = plt.subplots(figsize=(7, 5))
+    fig.patch.set_facecolor("#020617")
+    ax.set_facecolor("#020617")
+    if not render_data or not render_data.get("graph_nodes"):
+        ax.text(0.5, 0.5, "Start an episode to see the causal graph.",
+                color="#334155", ha="center", va="center",
+                transform=ax.transAxes, fontsize=12, style="italic")
+        ax.axis("off")
+        return fig
+    G = nx.DiGraph()
+    for node in render_data["graph_nodes"]:
+        G.add_node(node["id"], **node)
+    for edge in render_data["graph_edges"]:
+        G.add_edge(edge["source"], edge["target"], **edge)
+    queried = set(render_data.get("queried_nodes", []))
+    node_colors, node_sizes, edge_widths = [], [], []
+    for n, d in G.nodes(data=True):
+        if n in queried:
+            node_colors.append("#fbbf24"); node_sizes.append(700)
+        elif d.get("proxy"):
+            node_colors.append("#f87171"); node_sizes.append(500)
+        elif d.get("node_type") == "outcome":
+            node_colors.append("#60a5fa"); node_sizes.append(600)
+        elif d.get("node_type") == "policy":
+            node_colors.append("#a78bfa"); node_sizes.append(550)
         else:
-            colored.append(f"<span style='color:#60a5fa;'>{line}</span>")
-
-    inner = "\n".join(colored)
-    return (
-        "<div style='background:#0f172a; border:1px solid #1e293b; border-radius:6px; "
-        "padding:10px; max-height:320px; overflow-y:auto; font-family:monospace; font-size:11px;'>"
-        f"<pre style='margin:0;'>{inner}</pre></div>"
-    )
-
-
-# ── Reward chart ───────────────────────────────────────────────────────────────
-
-def draw_reward_panel(render_data: dict) -> plt.Figure:
-    fig, ax = plt.subplots(figsize=(6, 2.5))
-    fig.patch.set_facecolor("#0f172a")
-    ax.set_facecolor("#0f172a")
-
-    rewards = render_data.get("claim_rewards", [])
-    if not rewards:
-        ax.text(0.5, 0.5, "No claim rewards yet", color="#475569",
-                ha="center", va="center", transform=ax.transAxes, fontsize=10)
-        ax.axis("off")
-        return fig
-
-    cumulative = np.cumsum(rewards)
-    bar_colors = ["#4ade80" if r > 0 else "#f87171" for r in rewards]
-
-    ax.bar(range(len(rewards)), rewards, color=bar_colors, alpha=0.85, zorder=2)
-    ax2 = ax.twinx()
-    ax2.plot(range(len(cumulative)), cumulative,
-             color="#fbbf24", linewidth=2, marker="o", markersize=3, zorder=3)
-    ax2.tick_params(colors="#fbbf24", labelsize=7)
-
-    ax.set_xlabel("Claim #", color="#94a3b8", fontsize=8)
-    ax.set_ylabel("Per-claim reward", color="#94a3b8", fontsize=8)
-    ax2.set_ylabel("Cumulative", color="#fbbf24", fontsize=8)
-    ax.set_title(
-        f"Reward Breakdown  |  Total: {cumulative[-1]:+.2f}  |  {len(rewards)} claims",
-        color="#94a3b8", fontsize=9,
-    )
-    ax.tick_params(colors="#94a3b8", labelsize=7)
-    for spine in ax.spines.values():
-        spine.set_edgecolor("#1e293b")
-    ax.grid(axis="y", color="#1e293b", linewidth=0.5, zorder=1)
-    fig.tight_layout()
-    return fig
-
-
-# ── Arms race ──────────────────────────────────────────────────────────────────
-
-def draw_arms_race(auditor_rewards: list, defender_evasion: list) -> plt.Figure:
-    fig, ax = plt.subplots(figsize=(8, 3.5))
-    fig.patch.set_facecolor("#0f172a")
-    ax.set_facecolor("#0f172a")
-
-    if not auditor_rewards:
-        ax.text(0.5, 0.5, "Train the model to populate the arms-race chart.",
-                color="#475569", ha="center", va="center", transform=ax.transAxes)
-        ax.axis("off")
-        return fig
-
-    eps = range(len(auditor_rewards))
-    ax.plot(eps, auditor_rewards, color="#60a5fa", linewidth=2, label="Auditor Reward")
-    if defender_evasion:
-        ax.plot(eps, defender_evasion[:len(auditor_rewards)],
-                color="#f87171", linewidth=2, label="Defender Evasion Rate", linestyle="--")
-
-    if len(auditor_rewards) > 100:
-        ax.axvline(100, color="#fbbf24", linestyle=":", alpha=0.6)
-        ax.text(102, min(auditor_rewards) * 1.05, "Defender adapts",
-                color="#fbbf24", fontsize=7)
-    if len(auditor_rewards) > 200:
-        ax.axvline(200, color="#4ade80", linestyle=":", alpha=0.6)
-        ax.text(202, min(auditor_rewards) * 1.05, "Auditor catches up",
-                color="#4ade80", fontsize=7)
-
-    ax.set_xlabel("Training Episode", color="#94a3b8", fontsize=9)
-    ax.set_ylabel("Score", color="#94a3b8", fontsize=9)
-    ax.set_title("Arms Race: Auditor vs Defender Co-Evolution",
-                 color="#94a3b8", fontsize=10)
-    ax.tick_params(colors="#94a3b8")
-    ax.legend(facecolor="#1e293b", labelcolor="white", fontsize=8)
-    ax.grid(color="#1e293b", linewidth=0.5)
-    for spine in ax.spines.values():
-        spine.set_edgecolor("#1e293b")
-    fig.tight_layout()
-    return fig
-
-
-# ── Core action dispatch ───────────────────────────────────────────────────────
-
-def execute_action(action_json: str):
-    """Parse the JSON editor, step the env, return updated UI state."""
-    global _obs, _render, _last_result
-
-    if _env is None:
-        err = {"error": "No episode active. Click 'New Episode' first."}
-        return (
-            draw_graph({}),
-            format_claim_chain({}),
-            draw_reward_panel({}),
-            format_result(err),
-            _stats_html(),
-            "⚠️ No episode active.",
-        )
-
+            node_colors.append("#1e3a5f"); node_sizes.append(400)
+    for u, v, d in G.edges(data=True):
+        edge_widths.append(1.5 if d.get("anomalous") else 0.8)
     try:
-        action = json.loads(action_json)
-    except json.JSONDecodeError as e:
-        err = {"error": f"Invalid JSON: {e}"}
-        return (
-            draw_graph(_render or {}),
-            format_claim_chain(_render or {}),
-            draw_reward_panel(_render or {}),
-            format_result(err),
-            _stats_html(),
-            f"⚠️ JSON parse error: {e}",
-        )
+        pos = nx.spring_layout(G, seed=42, k=2.2)
+    except Exception:
+        pos = nx.random_layout(G)
+    nx.draw_networkx_edges(G, pos=pos, ax=ax, edge_color="#1e3a5f",
+                           arrows=True, arrowsize=12, width=edge_widths, alpha=0.7)
+    nx.draw_networkx_nodes(G, pos=pos, ax=ax,
+                           node_color=node_colors, node_size=node_sizes, alpha=0.95)
+    nx.draw_networkx_labels(G, pos=pos, ax=ax,
+                            font_color="#cbd5e1", font_size=6, font_weight="bold")
+    legend = [
+        mpatches.Patch(color="#fbbf24", label="Queried"),
+        mpatches.Patch(color="#f87171", label="Proxy / Anomalous"),
+        mpatches.Patch(color="#60a5fa", label="Outcome"),
+        mpatches.Patch(color="#a78bfa", label="Policy"),
+        mpatches.Patch(color="#1e3a5f", label="Feature"),
+    ]
+    ax.legend(handles=legend, loc="upper left", facecolor="#0f172a",
+              edgecolor="#334155", labelcolor="#94a3b8", fontsize=7, framealpha=0.95)
+    ax.axis("off")
+    ax.set_title(
+        f"Causal Graph  ·  {len(G.nodes)} nodes  ·  {len(G.edges)} edges  ·  {len(queried)} queried",
+        color="#475569", fontsize=8, pad=8)
+    fig.tight_layout(pad=0.5)
+    return fig
 
-    _obs, reward, done, info = _env.step(action)
-    _render = _env.render()
 
-    # Collect the most informative result to display
-    result = (
-        info.get("query_result")
-        or info.get("verification")
-        or info.get("episode_reward")
-        or info
-    )
-    _last_result = result
+# ── Episode step logic ──────────────────────────────────────────────────────────
+def _do_step():
+    global _step_index, _claims, _hypotheses, _budget, _reward_total
+    global _reward_components, _episode_done, _verdict_correct, _obs, _render
 
-    atype = action.get("type", "?")
+    if _env is None or _episode_done or _step_index >= len(SCRIPTED_ACTIONS):
+        return None, False
+
+    action = copy.deepcopy(SCRIPTED_ACTIONS[_step_index])
+    try:
+        _obs, reward, done, info = _env.step(action)
+        _render = _env.render()
+    except Exception:
+        return None, False
+
+    _step_index += 1
+    cost = 2 if action["type"] == "QUERY_COUNTERFACTUAL" else (1 if action["type"].startswith("QUERY_") else 0)
+    _budget = max(0, _budget - cost)
+
+    if action["type"] == "FLAG_HYPOTHESIS":
+        _hypotheses[action["hypothesis_type"]] = action["status"]
+    if _obs and _obs.get("hypothesis_flags"):
+        for k, v in _obs["hypothesis_flags"].items():
+            if k in _hypotheses:
+                _hypotheses[k] = v
+
+    if action["type"].startswith("CLAIM_"):
+        ver = info.get("verification", {})
+        true_c  = sum(1 for x in ver.values() if x is True)
+        false_c = sum(1 for x in ver.values() if x is False)
+        correct = true_c >= false_c
+        cd      = action.get("claim", {})
+        ct      = ("causal"       if "CAUSAL"      in action["type"] else
+                   "counterfactual" if "COUNTERFACTUAL" in action["type"] else
+                   "theory_of_mind")
+        _claims.append({"claim_type": ct, "step": _step_index - 1,
+                         "correct": correct, "reward_delta": reward, **cd})
+        comp = ("tom" if "THEORY" in action["type"] else
+                "counterfactual" if "COUNTERFACTUAL" in action["type"] else "claim")
+        _reward_components[comp] = _reward_components.get(comp, 0.0) + reward
+        _reward_total += reward
+
     if done:
-        ep = info.get("episode_reward", {})
-        terminal = ep.get("terminal", {})
-        status = (
-            f"✅ Episode done — terminal reward: {terminal.get('terminal_total', 0):.2f}  "
-            f"|  Verdict correct: {terminal.get('verdict_correct', False)}"
-        )
-    else:
-        status = f"✔ {atype} executed  |  step reward: {reward:+.2f}  |  budget left: {_obs.get('budget_remaining','?')}"
+        _episode_done = True
+        er = info.get("episode_reward", {})
+        if er:
+            interm = er.get("intermediate", {})
+            term   = er.get("terminal", {})
+            _reward_components = {
+                "claim":          interm.get("claim_reward",         0.0),
+                "counterfactual": interm.get("counterfactual_reward", 0.0),
+                "tom":            interm.get("tom_reward",            0.0),
+                "chain":          term.get("chain_score",            0.0),
+                "consistency":    term.get("consistency_penalty",    0.0),
+                "budget":         term.get("budget_efficiency",      0.0),
+            }
+            _reward_total    = er.get("total", 0.0)
+            _verdict_correct = term.get("verdict_correct")
 
+    return reward, done
+
+
+def _collect_outputs(level_str: str, status: str, timer_active: bool):
+    """Return all 7 Investigate tab outputs."""
     return (
-        draw_graph(_render),
-        format_claim_chain(_render),
-        draw_reward_panel(_render),
-        format_result(result),
-        _stats_html(),
+        draw_graph(_render or {}),
+        _claims_html(_claims),
+        _reward_html(_reward_components, _episode_done, _verdict_correct),
+        _hyp_html(_hypotheses),
+        _bottom_stats(_step_index, _budget, _reward_total, _claims, level_str),
         status,
+        gr.update(active=timer_active),
     )
 
 
-def load_template(action_type: str):
-    """Return the JSON template + description for the selected action type."""
+def _level_str() -> str:
+    if _obs and _obs.get("level"):
+        return f"L{_obs['level']}"
+    return f"L{_current_level}"
+
+
+# ── Episode handlers ────────────────────────────────────────────────────────────
+def new_episode_fn(level_radio, seed_num):
+    global _env, _obs, _render, _step_index, _claims, _hypotheses, _budget
+    global _reward_total, _reward_components, _episode_done, _verdict_correct, _current_level
+
+    level = int(str(level_radio).replace("L", "").strip()) if level_radio else 3
+    _current_level = level
+    _env   = ArbiterEnv(level=level)
+    seed   = int(seed_num) if seed_num else None
+    _obs   = _env.reset(seed=seed)
+    _render = _env.render()
+    _step_index    = 0
+    _claims        = []
+    _hypotheses    = {"proxy_discrimination": "ACTIVE",
+                      "adversarial_injection": "ACTIVE",
+                      "model_drift": "ACTIVE"}
+    _budget        = 20
+    _reward_total  = 0.0
+    _reward_components = {"claim": 0.0, "counterfactual": 0.0, "tom": 0.0,
+                           "chain": 0.0, "consistency": 0.0, "budget": 0.0}
+    _episode_done    = False
+    _verdict_correct = None
+    return _collect_outputs(_level_str(), f"Episode started at Level {level}. Seed: {seed}.", False)
+
+
+def step_fn():
+    if _env is None:
+        return _collect_outputs("—", "No episode — click New Episode first.", False)
+    if _episode_done:
+        return _collect_outputs(_level_str(), "Episode complete.", False)
+    if _step_index >= len(SCRIPTED_ACTIONS):
+        return _collect_outputs(_level_str(), "All scripted steps exhausted.", False)
+    _do_step()
+    atype   = SCRIPTED_ACTIONS[min(_step_index - 1, len(SCRIPTED_ACTIONS) - 1)]["type"]
+    suffix  = " — EPISODE COMPLETE" if _episode_done else ""
+    return _collect_outputs(_level_str(), f"Step {_step_index}: {atype}{suffix}", False)
+
+
+def auto_run_fn():
+    if _env is None:
+        return _collect_outputs("—", "No episode — click New Episode first.", False)
+    return _collect_outputs(_level_str(), "Auto-run started...", True)
+
+
+def pause_fn():
+    return _collect_outputs(_level_str(), "Paused.", False)
+
+
+def auto_tick_fn():
+    if _env is None or _episode_done or _step_index >= len(SCRIPTED_ACTIONS):
+        return _collect_outputs(_level_str(), "Episode complete.", False)
+    _do_step()
+    atype   = SCRIPTED_ACTIONS[min(_step_index - 1, len(SCRIPTED_ACTIONS) - 1)]["type"]
+    suffix  = " — EPISODE COMPLETE" if _episode_done else ""
+    still   = not _episode_done and _step_index < len(SCRIPTED_ACTIONS)
+    return _collect_outputs(_level_str(), f"Auto: step {_step_index} — {atype}{suffix}", still)
+
+
+# ── GRPO Training monitor ───────────────────────────────────────────────────────
+def _read_stdout_thread(proc):
+    global _log_buffer
+    try:
+        for raw in proc.stdout:
+            line = raw.decode("utf-8", errors="replace").rstrip()
+            _log_buffer.append(line)
+            if len(_log_buffer) > 300:
+                _log_buffer.pop(0)
+    except Exception:
+        pass
+
+
+def start_grpo_training(checkpoint, level, episodes, output):
+    global _training_process, _log_buffer
+    if _training_process and _training_process.poll() is None:
+        return "Training already running. Click Abort first."
+    checkpoint = (checkpoint or "").strip() or "lora_sft_v4"
+    output     = (output     or "").strip() or "lora_grpo"
+    log_path   = ROOT / "logs" / "grpo_training.jsonl"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.unlink(missing_ok=True)
+    _log_buffer = [f"[ARBITER] Launching GRPO training...",
+                   f"[ARBITER] Checkpoint : {checkpoint}",
+                   f"[ARBITER] Level      : {level}",
+                   f"[ARBITER] Episodes   : {episodes}",
+                   f"[ARBITER] Output     : {output}",
+                   f"[ARBITER] Log file   : {log_path}", ""]
+    cmd = [sys.executable, "-m", "arbiter.training.grpo_trainer",
+           "--checkpoint", str(ROOT / checkpoint),
+           "--level",      str(level),
+           "--episodes",   str(episodes),
+           "--output",     str(ROOT / output),
+           "--log_file",   str(log_path)]
+    _training_process = subprocess.Popen(cmd, cwd=str(ROOT),
+                                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    threading.Thread(target=_read_stdout_thread, args=(_training_process,), daemon=True).start()
+    return f"Training started (PID {_training_process.pid}). Monitor updates every 2 s."
+
+
+def abort_grpo_training():
+    global _training_process
+    if _training_process and _training_process.poll() is None:
+        _training_process.terminate()
+        _log_buffer.append("[ARBITER] Training aborted by user.")
+        return "Training aborted."
+    return "No active training process."
+
+
+def _read_grpo_log():
+    entries = []
+    try:
+        with open(ROOT / "logs" / "grpo_training.jsonl") as f:
+            for line in f:
+                try:
+                    entries.append(json.loads(line))
+                except Exception:
+                    pass
+    except FileNotFoundError:
+        pass
+    return entries
+
+
+def training_stats_html(entries: list) -> str:
+    is_running = bool(_training_process and _training_process.poll() is None)
+    dot_class  = "active" if is_running else "idle"
+    status_str = "TRAINING" if is_running else ("IDLE" if not entries else "COMPLETE")
+    status_col = "#4ade80" if is_running else ("#fbbf24" if entries else "#475569")
+    if not entries:
+        ep = reward = loss = evasion = level = "—"
+    else:
+        last    = entries[-1]
+        ep      = last.get("episode", "—")
+        reward  = f"{last.get('mean_reward', 0):.2f}"
+        loss    = f"{last.get('grpo_loss', 0):.4f}"
+        evasion = f"{last.get('defender_evasion', 0):.1%}"
+        level   = last.get("level", "—")
+    def pill(lbl, val, col):
+        return (f"<div class='stat-pill' style='border-color:{col}33;'>"
+                f"<span class='stat-label'>{lbl}</span>"
+                f"<span class='stat-value' style='color:{col};'>{val}</span></div>")
     return (
-        ACTION_TEMPLATES.get(action_type, "{}"),
-        ACTION_DESCRIPTIONS.get(action_type, ""),
+        f"<div class='stats-bar'>"
+        f"<div class='stat-pill' style='border-color:{status_col}33;'>"
+        f"<span class='stat-label'>Status</span>"
+        f"<span class='stat-value' style='color:{status_col};font-size:12px;display:flex;align-items:center;'>"
+        f"<span class='status-dot {dot_class}'></span>{status_str}</span></div>"
+        + pill("Episode", ep, "#60a5fa")
+        + pill("Reward",  reward, "#4ade80")
+        + pill("Loss",    loss, "#f87171")
+        + pill("Evasion", evasion, "#fbbf24")
+        + pill("Level",   level, "#a78bfa")
+        + "</div>"
     )
 
 
-def new_episode(level: int):
-    global _env, _obs, _render, _last_result
-    _get_env(level=int(level))
+def draw_training_chart(entries: list) -> plt.Figure:
+    fig, ax = plt.subplots(figsize=(8, 3.5))
+    fig.patch.set_facecolor("#020617")
+    ax.set_facecolor("#020617")
+    if not entries:
+        ax.text(0.5, 0.5, "Start GRPO training to see the live reward curve.",
+                color="#334155", ha="center", va="center",
+                transform=ax.transAxes, fontsize=11, style="italic")
+        ax.axis("off")
+        return fig
+    eps     = [e["episode"]         for e in entries]
+    rewards = [e["mean_reward"]      for e in entries]
+    evasion = [e["defender_evasion"] for e in entries]
+    if len(rewards) >= 5:
+        from scipy.ndimage import uniform_filter1d
+        rewards_sm = uniform_filter1d(rewards, size=min(10, len(rewards) // 2 or 1))
+    else:
+        rewards_sm = rewards
+    ax.plot(eps, rewards, color="#1e3a5f", linewidth=1, alpha=0.4)
+    ax.plot(eps, rewards_sm, color="#3b82f6", linewidth=2.5, label="Auditor Reward", zorder=3)
+    ax2 = ax.twinx()
+    ax2.plot(eps, [e * 100 for e in evasion],
+             color="#f87171", linewidth=1.8, linestyle="--", alpha=0.85, label="Defender Evasion %")
+    ax2.set_ylabel("Defender Evasion %", color="#f87171", fontsize=8)
+    ax2.tick_params(colors="#f87171", labelsize=7)
+    for sp in ax2.spines.values():
+        sp.set_edgecolor("#1e293b")
+    for e in entries:
+        if e.get("level_advanced"):
+            ax.axvline(e["episode"], color="#fbbf24", linewidth=1, linestyle=":", alpha=0.7)
+            ax.text(e["episode"] + 1, min(rewards) * 0.95, f"L{e['level_advanced']}", color="#fbbf24", fontsize=7)
+    ax.set_xlabel("Episode", color="#475569", fontsize=8)
+    ax.set_ylabel("Mean Reward", color="#3b82f6", fontsize=8)
+    final_r = rewards_sm[-1] if rewards_sm else 0
+    ax.set_title(f"GRPO Training  ·  {len(entries)} episodes  ·  Latest reward: {final_r:.2f}",
+                 color="#64748b", fontsize=9, pad=6)
+    ax.tick_params(colors="#475569", labelsize=7)
+    for sp in ax.spines.values():
+        sp.set_edgecolor("#1e293b")
+    ax.grid(color="#0f172a", linewidth=0.8, zorder=0)
+    l1, lb1 = ax.get_legend_handles_labels()
+    l2, lb2 = ax2.get_legend_handles_labels()
+    ax.legend(l1 + l2, lb1 + lb2, facecolor="#0f172a", edgecolor="#334155",
+              labelcolor="#94a3b8", fontsize=8, loc="upper left")
+    fig.tight_layout(pad=0.5)
+    return fig
+
+
+def get_log_html() -> str:
+    if not _log_buffer:
+        return "<div class='training-log'>Waiting for training to start...</div>"
+    lines_html = []
+    for line in _log_buffer[-80:]:
+        if "Advanced" in line or ("Level" in line and "***" in line):
+            lines_html.append(f"<div style='color:#fbbf24;font-weight:700;'>{line}</div>")
+        elif "Error" in line or "error" in line:
+            lines_html.append(f"<div style='color:#f87171;'>{line}</div>")
+        elif line.startswith("[ARBITER]"):
+            lines_html.append(f"<div style='color:#60a5fa;'>{line}</div>")
+        else:
+            lines_html.append(f"<div>{line}</div>")
     return (
-        draw_graph(_render),
-        format_claim_chain(_render),
-        draw_reward_panel(_render),
-        format_result(None),
-        _stats_html(),
-        f"▶ New episode started at level {int(level)}.",
+        "<div class='training-log' id='tlog'>"
+        + "".join(lines_html)
+        + "<script>document.getElementById('tlog').scrollTop=99999;</script></div>"
     )
 
 
-# ── Gradio layout ──────────────────────────────────────────────────────────────
-
-CSS = """
-body, .gradio-container { background: #0f172a !important; }
-h1, h2, h3, label, .label-wrap span { color: #e2e8f0 !important; }
-.block { background: #0f172a !important; border-color: #1e293b !important; }
-textarea, input[type=text] {
-    background: #0f172a !important;
-    color: #e2e8f0 !important;
-    border-color: #334155 !important;
-    font-family: monospace !important;
-    font-size: 12px !important;
-}
-select, .wrap { background: #0f172a !important; color: #e2e8f0 !important; }
-.svelte-1ipelgc { color: #e2e8f0 !important; }
-.status-bar { font-family: monospace; font-size: 12px; color: #94a3b8;
-              background: #0f172a; padding: 6px 10px; border-radius: 5px;
-              border: 1px solid #1e293b; }
+_IDLE_CHART_HTML = """
+<div style="background:#0f172a;border:1px solid #1e293b;border-radius:10px;
+    display:flex;flex-direction:column;align-items:center;justify-content:center;
+    height:280px;gap:12px;">
+  <div style="font-size:2.5rem;">📡</div>
+  <div style="color:#475569;font-size:1rem;font-weight:600;">No Training in Progress</div>
+  <div style="color:#334155;font-size:0.8rem;text-align:center;max-width:320px;line-height:1.6;">
+    Configure settings above and click
+    <strong style="color:#60a5fa;">Start GRPO Training</strong> to begin.
+  </div>
+</div>
 """
 
 
-def build_demo() -> gr.Blocks:
-    with gr.Blocks(
-        theme=gr.themes.Base(
-            primary_hue="blue",
-            neutral_hue="slate",
-            font=gr.themes.GoogleFont("Inter"),
-        ),
-        css=CSS,
-        title="ARBITER — AI Oversight Training Environment",
-    ) as demo:
+def refresh_training(_checkpoint=None, _level=None, _episodes=None, _output=None):
+    is_running = bool(_training_process and _training_process.poll() is None)
+    entries    = _read_grpo_log()
+    if not is_running and not entries:
+        return (training_stats_html([]), gr.update(visible=True),
+                gr.update(visible=False), get_log_html(), gr.update(active=False))
+    chart_fig = draw_training_chart(entries)
+    return (training_stats_html(entries), gr.update(visible=False),
+            gr.update(value=chart_fig, visible=True), get_log_html(),
+            gr.update(active=is_running))
 
-        gr.Markdown(
-            "# ARBITER — AI Oversight Training Environment\n"
-            "_Autonomous Reasoning-Based Inspector for Training Environments with Recursive Oversight_"
-        )
+
+# ── Arms race chart ─────────────────────────────────────────────────────────────
+def draw_arms_race_from_files() -> plt.Figure:
+    fig, ax = plt.subplots(figsize=(8, 3.5))
+    fig.patch.set_facecolor("#020617")
+    ax.set_facecolor("#020617")
+    entries = _read_grpo_log()
+    if not entries:
+        try:
+            summary = json.loads((ROOT / "lora_grpo" / "training_summary.json").read_text())
+            rewards = summary.get("reward_curve", [])
+            evasion = summary.get("defender_evasion", [])
+        except Exception:
+            rewards, evasion = [], []
+    else:
+        rewards = [e["mean_reward"]      for e in entries]
+        evasion = [e["defender_evasion"] for e in entries]
+    if not rewards:
+        ax.text(0.5, 0.5, "Run GRPO training to see the arms-race curve.",
+                color="#334155", ha="center", va="center",
+                transform=ax.transAxes, fontsize=11, style="italic")
+        ax.axis("off")
+        return fig
+    eps = range(len(rewards))
+    ax.plot(eps, rewards, color="#3b82f6", linewidth=2.5, label="Auditor Reward", zorder=3)
+    if evasion:
+        ax2 = ax.twinx()
+        ax2.plot(range(len(evasion)), [e * 100 for e in evasion],
+                 color="#f87171", linewidth=2, linestyle="--", label="Defender Evasion %")
+        ax2.set_ylabel("Defender Evasion %", color="#f87171", fontsize=8)
+        ax2.tick_params(colors="#f87171", labelsize=7)
+        for sp in ax2.spines.values():
+            sp.set_edgecolor("#1e293b")
+    ax.set_xlabel("Episode", color="#475569", fontsize=8)
+    ax.set_ylabel("Mean Reward", color="#3b82f6", fontsize=8)
+    ax.set_title("Arms Race: Auditor vs Defender Co-Evolution", color="#64748b", fontsize=9)
+    ax.tick_params(colors="#475569", labelsize=7)
+    for sp in ax.spines.values():
+        sp.set_edgecolor("#1e293b")
+    ax.grid(color="#0f172a", linewidth=0.8)
+    ax.legend(facecolor="#0f172a", edgecolor="#334155", labelcolor="#94a3b8", fontsize=8)
+    fig.tight_layout(pad=0.5)
+    return fig
+
+
+# ── Gradio app ──────────────────────────────────────────────────────────────────
+def build_demo() -> gr.Blocks:
+    init_hyp = {"proxy_discrimination": "ACTIVE", "adversarial_injection": "ACTIVE", "model_drift": "ACTIVE"}
+    init_rc  = {"claim": 0.0, "counterfactual": 0.0, "tom": 0.0, "chain": 0.0, "consistency": 0.0, "budget": 0.0}
+
+    with gr.Blocks(title="ARBITER — AI Oversight Training Environment") as demo:
+
+        gr.HTML(HEADER_HTML)
 
         with gr.Tabs():
 
-            # ── Tab 1: Live Episode ──────────────────────────────────────────
-            with gr.Tab("Live Episode"):
+            # ── Tab 1: Investigate ─────────────────────────────────────────────
+            with gr.Tab("Investigate"):
 
-                # Episode controls
+                # ── Controls row ──
                 with gr.Row():
-                    level_slider = gr.Slider(1, 7, value=3, step=1,
-                                             label="Curriculum Level", scale=3)
-                    start_btn    = gr.Button("New Episode", variant="primary", scale=1)
+                    level_radio = gr.Radio(
+                        choices=["L1", "L2", "L3", "L4", "L5"],
+                        value="L3", label="Curriculum Level", scale=3,
+                    )
+                    model_radio = gr.Radio(
+                        choices=["UNTRAINED", "SFT ONLY", "FULL ARBITER"],
+                        value="UNTRAINED", label="Model Mode", scale=4,
+                    )
+                    seed_num = gr.Number(value=42, label="Seed", precision=0, scale=1)
 
-                # Stats bar
-                stats_html = gr.HTML(_stats_html())
+                with gr.Row():
+                    new_btn   = gr.Button("New Episode",  variant="primary",    scale=2)
+                    step_btn  = gr.Button("Step  →",      variant="secondary",  scale=2)
+                    auto_btn  = gr.Button("Auto-run  ▶",  variant="secondary",  scale=2)
+                    pause_btn = gr.Button("Pause  ‖",     variant="secondary",  scale=1)
 
-                # Status line
-                status_md = gr.Markdown(
-                    "_Click **New Episode** to begin._",
-                    elem_classes=["status-bar"],
-                )
+                status_md  = gr.Markdown("_Click **New Episode** to start. Then use **Step** or **Auto-run**._")
+                stats_html = gr.HTML(_bottom_stats(0, 20, 0.0, [], "L3"))
 
-                # Main three-column row
+                # ── Main layout ──
                 with gr.Row(equal_height=False):
-
-                    # ── Left: Causal graph ───────────────────────────────────
-                    with gr.Column(scale=4):
+                    with gr.Column(scale=6):
                         graph_plot = gr.Plot(label="Causal Decision Graph", show_label=True)
 
-                    # ── Center: Action panel ─────────────────────────────────
-                    with gr.Column(scale=3):
-                        gr.Markdown("### Action Panel")
+                    with gr.Column(scale=5):
+                        claim_html  = gr.HTML(_claims_html([]))
+                        reward_html = gr.HTML(_reward_html(init_rc, False, None))
+                        hyp_html    = gr.HTML(_hyp_html(init_hyp))
 
-                        action_type = gr.Dropdown(
-                            choices=list(ACTION_TEMPLATES.keys()),
-                            value="QUERY_RECORDS",
-                            label="Action Type",
-                        )
-                        action_desc = gr.Markdown(
-                            ACTION_DESCRIPTIONS["QUERY_RECORDS"],
-                            elem_classes=["status-bar"],
-                        )
-                        action_json = gr.Textbox(
-                            value=ACTION_TEMPLATES["QUERY_RECORDS"],
-                            label="Action JSON  (edit then Execute)",
-                            lines=14,
-                            max_lines=20,
-                        )
-                        exec_btn = gr.Button("Execute Action", variant="primary")
+                # ── Auto-step timer (inactive until Auto-run clicked) ──
+                step_timer = gr.Timer(value=1.5, active=False)
 
-                    # ── Right: Last result ───────────────────────────────────
-                    with gr.Column(scale=3):
-                        gr.Markdown("### Last Result")
-                        result_html = gr.HTML(format_result(None))
+                _all = [graph_plot, claim_html, reward_html, hyp_html, stats_html, status_md, step_timer]
 
-                # Bottom row: claim chain + reward chart
+                new_btn.click(fn=new_episode_fn,  inputs=[level_radio, seed_num], outputs=_all)
+                step_btn.click(fn=step_fn,                                         outputs=_all)
+                auto_btn.click(fn=auto_run_fn,                                     outputs=_all)
+                pause_btn.click(fn=pause_fn,                                        outputs=_all)
+                step_timer.tick(fn=auto_tick_fn,                                    outputs=_all)
+
+                demo.load(fn=lambda: new_episode_fn("L3", 42), outputs=_all)
+
+            # ── Tab 2: Training Monitor ────────────────────────────────────────
+            with gr.Tab("Training Monitor"):
+
+                gr.Markdown("## GRPO Training Control Center")
+                gr.Markdown(
+                    "Configure and launch GRPO reinforcement learning. "
+                    "The reward curve, level advances, and defender evasion update live every 2 s."
+                )
                 with gr.Row():
-                    with gr.Column(scale=5):
-                        gr.Markdown("### Claim Chain")
-                        claim_html = gr.HTML(format_claim_chain({}))
+                    t_checkpoint = gr.Textbox(value="lora_sft_v4", label="SFT Checkpoint", scale=3)
+                    t_output     = gr.Textbox(value="lora_grpo",   label="Output Path",   scale=3)
+                    t_level      = gr.Slider(1, 5, value=1, step=1, label="Start Level",  scale=2)
+                    t_episodes   = gr.Slider(50, 500, value=300, step=50, label="Episodes", scale=2)
+                with gr.Row():
+                    train_btn = gr.Button("Start GRPO Training", variant="primary",    scale=2)
+                    abort_btn = gr.Button("Abort Training",       variant="secondary", scale=1)
 
-                    with gr.Column(scale=5):
-                        reward_plot = gr.Plot(label="Reward Breakdown", show_label=True)
+                train_status   = gr.Markdown("_Configure settings above and click Start._")
+                train_stats_ht = gr.HTML(training_stats_html([]))
 
-                # ── Event wiring ─────────────────────────────────────────────
+                train_chart_ph = gr.HTML(_IDLE_CHART_HTML, visible=True)
+                train_chart    = gr.Plot(label="Live Reward Curve", show_label=True, visible=False)
+                train_log      = gr.HTML(get_log_html())
 
-                # Template loader — update JSON + description when type changes
-                action_type.change(
-                    load_template,
-                    inputs=[action_type],
-                    outputs=[action_json, action_desc],
-                )
+                grpo_timer = gr.Timer(value=2.0, active=False)
+                _grpo_outs = [train_stats_ht, train_chart_ph, train_chart, train_log, grpo_timer]
+                grpo_timer.tick(fn=refresh_training,
+                                inputs=[t_checkpoint, t_level, t_episodes, t_output],
+                                outputs=_grpo_outs)
 
-                _all_outputs = [
-                    graph_plot, claim_html, reward_plot,
-                    result_html, stats_html, status_md,
-                ]
+                def _start_and_activate(cp, lv, ep, out):
+                    msg = start_grpo_training(cp, lv, ep, out)
+                    return msg, gr.update(active=True)
 
-                exec_btn.click(
-                    execute_action,
-                    inputs=[action_json],
-                    outputs=_all_outputs,
-                )
+                train_btn.click(fn=_start_and_activate,
+                                inputs=[t_checkpoint, t_level, t_episodes, t_output],
+                                outputs=[train_status, grpo_timer])
+                abort_btn.click(fn=abort_grpo_training, outputs=[train_status])
 
-                start_btn.click(
-                    new_episode,
-                    inputs=[level_slider],
-                    outputs=_all_outputs,
-                )
-
-                demo.load(
-                    lambda: new_episode(3),
-                    outputs=_all_outputs,
-                )
-
-            # ── Tab 2: Arms Race ─────────────────────────────────────────────
+            # ── Tab 3: Arms Race ───────────────────────────────────────────────
             with gr.Tab("Arms Race"):
-                gr.Markdown("### Auditor Reward vs Defender Evasion Rate over Training")
-                arms_plot   = gr.Plot(label="Arms Race Co-Evolution")
-                refresh_btn = gr.Button("Refresh")
+                gr.Markdown("## Auditor vs Defender Co-Evolution")
+                gr.Markdown(
+                    "Auditor reward and Defender evasion rate over GRPO training. "
+                    "Loads from the live log or the last saved checkpoint summary."
+                )
+                arms_plot   = gr.Plot(label="Arms Race", show_label=True)
+                refresh_btn = gr.Button("Refresh", variant="secondary")
+                refresh_btn.click(draw_arms_race_from_files, outputs=[arms_plot])
+                demo.load(draw_arms_race_from_files, outputs=[arms_plot])
 
-                def _refresh():
-                    return draw_arms_race(
-                        _arms_race_data["auditor"],
-                        _arms_race_data["defender"],
-                    )
-
-                refresh_btn.click(_refresh, outputs=[arms_plot])
-                demo.load(_refresh, outputs=[arms_plot])
-
-            # ── Tab 3: Action Reference ──────────────────────────────────────
-            with gr.Tab("Action Reference"):
-                ref_rows = []
+            # ── Tab 4: Reference ───────────────────────────────────────────────
+            with gr.Tab("Reference"):
+                gr.Markdown("## Action Reference")
                 param_docs = {
                     "QUERY_RECORDS":
-                        "• `feature_filter` — dict of feature→value pairs (empty = no filter)\n"
-                        "• `outcome_filter` — `\"approved\"` | `\"denied\"` | null\n"
-                        "• `time_range` — `[start, end]` floats | null\n"
-                        "• **Budget cost:** 1",
+                        "- `feature_filter` — dict of feature→value pairs (empty = all records)\n"
+                        "- `outcome_filter` — `\"approved\"` | `\"denied\"` | null\n"
+                        "- `time_range` — `[start, end]` | null\n"
+                        "- **Budget cost: 1**",
                     "QUERY_FEATURE_DISTRIBUTION":
-                        "• `feature_id` — name of the feature to histogram\n"
-                        "• `group_by` — optional second feature to split by\n"
-                        "• **Budget cost:** 1",
+                        "- `feature_id` — exact feature name\n"
+                        "- `group_by` — optional second feature to split by\n"
+                        "- **Budget cost: 1**",
                     "QUERY_COUNTERFACTUAL":
-                        "• `record_id` — e.g. `\"rec_0000\"`\n"
-                        "• `feature_id` — feature to intervene on\n"
-                        "• `counterfactual_value` — the new value\n"
-                        "• **Budget cost:** 2  _(must run before CLAIM_COUNTERFACTUAL)_",
+                        "- `record_id` — e.g. `rec_0041`\n"
+                        "- `feature_id` — feature to intervene on\n"
+                        "- `counterfactual_value` — the new value\n"
+                        "- **Budget cost: 2**",
                     "FLAG_HYPOTHESIS":
-                        "• `hypothesis_type` — `\"decoy_a\"` | `\"decoy_b\"` | custom string\n"
-                        "• `status` — `\"ACTIVE\"` | `\"DISMISSED\"`\n"
-                        "• **Budget cost:** free",
+                        "- `hypothesis_type` — `proxy_discrimination` | `adversarial_injection` | `model_drift`\n"
+                        "- `status` — `ACTIVE` | `WEAKENED` | `ELIMINATED` | `CONFIRMED`\n"
+                        "- **Free action**",
                     "CLAIM_CAUSAL":
-                        "• `cause_feature`, `effect_outcome`, `mechanism`\n"
-                        "• `direction` — `\"positive\"` | `\"negative\"`\n"
-                        "• `confidence` — `\"HIGH\"` | `\"MEDIUM\"` | `\"LOW\"`\n"
-                        "• `basis_records` — list of record IDs\n"
-                        "• `anomaly_type` — `\"proxy_discrimination\"` | `\"adversarial_injection\"` | `\"model_drift\"`\n"
-                        "• **Reward:** up to +1.0 (HIGH confidence penalty −0.5 if wrong)",
+                        "- `cause_feature`, `effect_outcome`, `mechanism`, `direction`, `confidence`\n"
+                        "- `basis_records` — list of rec_XXXX IDs\n"
+                        "- `anomaly_type` — `proxy_discrimination` | `adversarial_injection` | `model_drift`\n"
+                        "- **Reward: up to +1.0**",
                     "CLAIM_COUNTERFACTUAL":
-                        "• `subject_record` — record ID\n"
-                        "• `counterfactual_feature` — feature that was intervened on\n"
-                        "• `predicted_outcome_change` — `\"approved\"` | `\"denied\"` | `\"flagged\"` | `\"no_change\"`\n"
-                        "• `confidence`, `basis`\n"
-                        "• **Reward:** up to +2.0  _(requires prior QUERY_COUNTERFACTUAL)_",
+                        "- `subject_record`, `counterfactual_feature`\n"
+                        "- `predicted_outcome_change` — `approved` | `denied`\n"
+                        "- `confidence`, `basis`\n"
+                        "- **Reward: up to +2.0** _(requires prior QUERY_COUNTERFACTUAL)_",
                     "CLAIM_THEORY_OF_MIND":
-                        "• `defender_action` — `\"obfuscating\"` | `\"injecting\"` | `\"manipulating\"`\n"
-                        "• `target_link` — e.g. `\"zip_code_cluster→internal_risk_score\"`\n"
-                        "• `obfuscation_method` — `\"link_substitution\"` | `\"record_injection\"` | `\"proxy_laundering\"` | `\"timestamp_manipulation\"`\n"
-                        "• `confidence`, `basis`\n"
-                        "• **Reward:** +3.0 bonus if fully correct  _(Level 4+ only)_",
+                        "- `defender_action`, `target_link`, `obfuscation_method`, `confidence`, `basis`\n"
+                        "- **+3.0 bonus if fully correct** _(Level 4+ only)_",
                     "SUBMIT_REPORT":
-                        "• `anomaly_type` — `\"proxy_discrimination\"` | `\"adversarial_injection\"` | `\"model_drift\"` | `\"unknown\"`\n"
-                        "• `primary_evidence_chain` — ordered list of node IDs\n"
-                        "• `affected_demographic` — string describing affected group\n"
-                        "• `recommended_action` — `\"audit\"` | `\"retrain\"` | `\"halt\"` | `\"monitor\"`\n"
-                        "• **Ends the episode.** Triggers full terminal reward computation.",
+                        "- `anomaly_type`, `primary_evidence_chain`, `affected_demographic`, `recommended_action`\n"
+                        "- **Terminal action — ends episode and triggers full reward.**",
                 }
                 for atype, doc in param_docs.items():
-                    with gr.Accordion(f"{atype}  —  {ACTION_DESCRIPTIONS[atype]}", open=False):
+                    with gr.Accordion(atype, open=False):
                         gr.Markdown(doc)
 
     return demo
 
 
 def main():
-    _get_env(level=3)
     demo = build_demo()
-    demo.launch(share=False, server_name="0.0.0.0", server_port=7860)
+    demo.launch(
+        share=False,
+        server_name="0.0.0.0",
+        server_port=7860,
+        theme=gr.themes.Base(
+            primary_hue="blue",
+            neutral_hue="slate",
+            font=gr.themes.GoogleFont("Inter"),
+        ),
+        css=CSS,
+    )
 
 
 if __name__ == "__main__":

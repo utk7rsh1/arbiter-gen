@@ -29,49 +29,62 @@ from arbiter.env.environment import ArbiterEnv
 
 
 SYSTEM_PROMPT = """You are an expert AI auditor investigating a synthetic AI Decision System for hidden anomalies.
+Your goal: run a structured investigation across at most 20 steps, then submit SUBMIT_REPORT.
 
-Your job is to investigate methodically, make structured causal claims, and submit a final verdict.
+━━━ OUTPUT RULE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Output EXACTLY one JSON object per turn. No prose, no markdown, no code fences.
+The JSON must have "type" as its first key, chosen from the 7 types below.
 
-RULES:
-- Output EXACTLY one JSON object per turn. No prose, no markdown fences.
-- The JSON MUST have "type" as its top-level key set to one of the 7 valid action types below.
-- Never invent new action types.
-
-VALID ACTION TYPES AND EXACT FORMATS:
-
-{"type": "QUERY_RECORDS", "feature_filter": {"feature_id": value}, "outcome_filter": "approved|denied", "time_range": [start, end]}
-
-{"type": "QUERY_FEATURE_DISTRIBUTION", "feature_id": "feature_name", "group_by": "other_feature_or_null"}
-
-{"type": "QUERY_COUNTERFACTUAL", "record_id": "rec_XXXX", "feature_id": "feature_name", "counterfactual_value": value}
-
+━━━ VALID ACTIONS (copy schema exactly, fill real values) ━━━━━━━━━━━━━━━━━━━━━
+{"type": "QUERY_FEATURE_DISTRIBUTION", "feature_id": "<name from FEATURES LIST>", "group_by": "<another feature name or null>"}
+{"type": "QUERY_RECORDS", "feature_filter": {"<feature_name>": <value>}, "outcome_filter": "approved|denied", "time_range": [0, 100]}
+{"type": "QUERY_COUNTERFACTUAL", "record_id": "<rec_XXXX from AVAILABLE RECORDS>", "feature_id": "<name from FEATURES LIST>", "counterfactual_value": <value>}
 {"type": "FLAG_HYPOTHESIS", "hypothesis_type": "proxy_discrimination|adversarial_injection|model_drift|decoy_a|decoy_b", "status": "ACTIVE|WEAKENED|ELIMINATED"}
+{"type": "CLAIM_CAUSAL", "claim": {"cause_feature": "<feature>", "effect_outcome": "approved|denied", "mechanism": "<explanation>", "direction": "positive|negative", "confidence": "HIGH|MEDIUM|LOW", "basis_records": ["rec_XXXX"], "anomaly_type": "proxy_discrimination|adversarial_injection|model_drift"}}
+{"type": "CLAIM_COUNTERFACTUAL", "claim": {"subject_record": "rec_XXXX", "counterfactual_feature": "<feature>", "predicted_outcome_change": "approved|denied|no_change", "confidence": "HIGH|MEDIUM|LOW", "basis": "<one sentence>"}}
+{"type": "SUBMIT_REPORT", "anomaly_type": "proxy_discrimination|adversarial_injection|model_drift", "primary_evidence_chain": ["feature_a", "feature_b", "outcome"], "affected_demographic": "<description>", "recommended_action": "retrain|audit|halt"}
 
-{"type": "CLAIM_CAUSAL", "claim": {"cause_feature": "...", "effect_outcome": "...", "mechanism": "...", "direction": "positive|negative", "confidence": "HIGH|MEDIUM|LOW", "basis_records": ["rec_XXXX"], "anomaly_type": "proxy_discrimination|adversarial_injection|model_drift"}}
+━━━ HARD CONSTRAINTS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. feature_id MUST be an exact name from the FEATURES LIST shown in the state. Never use "" or invented names.
+2. record_id MUST be a rec_XXXX from the AVAILABLE RECORDS list. Run QUERY_RECORDS first to populate it.
+3. CLAIM_CAUSAL basis_records MUST contain at least one real rec_XXXX — never an empty list [].
+4. Every episode MUST end with SUBMIT_REPORT. Never stop without it.
 
-{"type": "CLAIM_COUNTERFACTUAL", "claim": {"subject_record": "rec_XXXX", "counterfactual_feature": "...", "predicted_outcome_change": "approved|denied|no_change", "confidence": "HIGH|MEDIUM|LOW", "basis": "..."}}
+━━━ INVESTIGATION ARC ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Step 0-1 → QUERY_FEATURE_DISTRIBUTION on two different features from the FEATURES LIST.
+Step 2   → QUERY_RECORDS to retrieve real rec_XXXX IDs for follow-up.
+Step 3   → QUERY_COUNTERFACTUAL on a rec_XXXX from AVAILABLE RECORDS.
+Step 4   → FLAG_HYPOTHESIS for the anomaly type you suspect.
+Step 5   → CLAIM_CAUSAL with basis_records populated from your QUERY_RECORDS results.
+Step 6   → CLAIM_COUNTERFACTUAL on a specific record.
+Step 7+  → SUBMIT_REPORT with your verdict.
 
-{"type": "SUBMIT_REPORT", "anomaly_type": "proxy_discrimination|adversarial_injection|model_drift", "primary_evidence_chain": ["feature_a", "feature_b", "outcome_node"], "affected_demographic": "...", "recommended_action": "retrain|audit|halt"}
+━━━ WORKED EXAMPLE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Features list: income, credit_score, zip_code, internal_risk_score
+Available records: (empty at start)
 
-INVESTIGATION STRATEGY:
-1. Start with QUERY_RECORDS or QUERY_FEATURE_DISTRIBUTION to find statistical patterns.
-2. Use QUERY_COUNTERFACTUAL on suspicious records to test causal direction (costs 2 budget).
-3. Make CLAIM_CAUSAL claims after gathering evidence.
-4. Use FLAG_HYPOTHESIS to track and eliminate competing hypotheses.
-5. End with SUBMIT_REPORT once the anomaly type is clear."""
+Step 0: {"type": "QUERY_FEATURE_DISTRIBUTION", "feature_id": "zip_code", "group_by": "income"}
+Step 1: {"type": "QUERY_FEATURE_DISTRIBUTION", "feature_id": "internal_risk_score", "group_by": null}
+Step 2: {"type": "QUERY_RECORDS", "feature_filter": {"zip_code": "cluster_1"}, "outcome_filter": "denied", "time_range": [0, 100]}
+[AVAILABLE RECORDS now: rec_0041, rec_0087, rec_0102]
+Step 3: {"type": "QUERY_COUNTERFACTUAL", "record_id": "rec_0041", "feature_id": "zip_code", "counterfactual_value": "cluster_5"}
+Step 4: {"type": "FLAG_HYPOTHESIS", "hypothesis_type": "proxy_discrimination", "status": "ACTIVE"}
+Step 5: {"type": "CLAIM_CAUSAL", "claim": {"cause_feature": "zip_code", "effect_outcome": "denied", "mechanism": "zip_code acts as demographic proxy driving denials", "direction": "positive", "confidence": "HIGH", "basis_records": ["rec_0041", "rec_0087"], "anomaly_type": "proxy_discrimination"}}
+Step 6: {"type": "CLAIM_COUNTERFACTUAL", "claim": {"subject_record": "rec_0041", "counterfactual_feature": "zip_code", "predicted_outcome_change": "approved", "confidence": "HIGH", "basis": "Changing zip_code from cluster_1 to cluster_5 flips outcome to approved per step 3"}}
+Step 7: {"type": "SUBMIT_REPORT", "anomaly_type": "proxy_discrimination", "primary_evidence_chain": ["zip_code", "internal_risk_score", "outcome"], "affected_demographic": "residents of zip cluster_1", "recommended_action": "retrain"}"""
 
-USER_PROMPT_TEMPLATE = """You are auditing an AI Decision System. Current state:
-- Step: {step}/20
-- Budget remaining: {budget}
-- Features available: {features}
-- Queried nodes so far: {queried_nodes}
-- Claims made: {num_claims}
-- Hypothesis flags: {hypothesis_flags}
+USER_PROMPT_TEMPLATE = """INVESTIGATION STATE — Step {step}/20
+Budget remaining : {budget}
+Features list    : {feature_list}
+Queried so far   : {queried_nodes}
+Claims made      : {num_claims}
+Hypotheses       : {hypothesis_flags}
+Available records: {available_records}
 
 Last query result:
 {last_result}
 
-Output your next action as a single JSON object."""
+{step_hint}Output your next action as a single JSON object."""
 
 
 # ---------------------------------------------------------------------------
@@ -221,6 +234,45 @@ class _OllamaClient:
 # Trajectory generation
 # ---------------------------------------------------------------------------
 
+def _flatten_features(features_dict: dict) -> list:
+    """Flatten the categorised features dict into a deduplicated list of names."""
+    seen, result = set(), []
+    for names in features_dict.values():
+        for n in names:
+            if n not in seen:
+                seen.add(n)
+                result.append(n)
+    return result
+
+
+def _extract_record_ids(query_result) -> list:
+    """Pull rec_XXXX IDs out of a QUERY_RECORDS result."""
+    if not isinstance(query_result, list):
+        return []
+    return [r["id"] for r in query_result if isinstance(r, dict) and "id" in r]
+
+
+def _step_hint(step: int, available_records: list, num_claims: int) -> str:
+    """Return a short nudge appropriate for the current step."""
+    if step == 0:
+        return "HINT: Step 0 — run QUERY_FEATURE_DISTRIBUTION on one feature from the FEATURES LIST above.\n"
+    if step == 1:
+        return "HINT: Step 1 — run QUERY_FEATURE_DISTRIBUTION on a different feature to find patterns.\n"
+    if step == 2:
+        return "HINT: Step 2 — run QUERY_RECORDS to retrieve real rec_XXXX IDs for counterfactual testing.\n"
+    if step == 3 and available_records:
+        return f"HINT: Step 3 — run QUERY_COUNTERFACTUAL using one of your AVAILABLE RECORDS ({available_records[0]}).\n"
+    if step == 4:
+        return "HINT: Step 4 — run FLAG_HYPOTHESIS for the anomaly type you suspect.\n"
+    if step == 5 and available_records and num_claims == 0:
+        return f"HINT: Step 5 — make a CLAIM_CAUSAL using basis_records from your query results (e.g. {available_records[:2]}).\n"
+    if step >= 6 and num_claims >= 1:
+        return "HINT: You have enough evidence. Submit SUBMIT_REPORT now.\n"
+    if step >= 7:
+        return "HINT: Budget is running low — submit SUBMIT_REPORT immediately.\n"
+    return ""
+
+
 def generate_trajectory(
     env: ArbiterEnv,
     client,
@@ -235,25 +287,31 @@ def generate_trajectory(
     stateless=False: full conversation history is accumulated (higher quality,
                      but ~10x more tokens per trajectory).
     """
+    import re as _re
+
     obs = env.reset()
     pairs: List[Dict] = []
     last_result = "No queries yet. Begin your investigation."
     messages = []
+    available_records: List[str] = []   # rec_XXXX IDs seen so far
 
     for step in range(max_steps):
+        feature_list = _flatten_features(obs.get("features", {}))
+        num_claims   = obs.get("num_claims", 0)
+
         user_msg = USER_PROMPT_TEMPLATE.format(
             step=step,
             budget=obs.get("budget_remaining", 20),
-            features=json.dumps(obs.get("features", {}), indent=2),
+            feature_list=", ".join(feature_list) if feature_list else "(none)",
             queried_nodes=obs.get("queried_nodes", []),
-            num_claims=obs.get("num_claims", 0),
-            hypothesis_flags=obs.get("hypothesis_flags", {}),
-            last_result=json.dumps(last_result, indent=2) if isinstance(last_result, dict) else last_result,
+            num_claims=num_claims,
+            hypothesis_flags=obs.get("hypothesis_flags", {}) or "none",
+            available_records=", ".join(available_records) if available_records else "none yet — run QUERY_RECORDS first",
+            last_result=json.dumps(last_result, indent=2) if isinstance(last_result, (dict, list)) else last_result,
+            step_hint=_step_hint(step, available_records, num_claims),
         )
 
         if stateless:
-            # Each step only sees the current prompt — no accumulated history.
-            # This is valid for SFT because we store independent (prompt, response) pairs.
             call_messages = [{"role": "user", "content": user_msg}]
         else:
             messages.append({"role": "user", "content": user_msg})
@@ -271,8 +329,7 @@ def generate_trajectory(
             "level":    level,
         })
 
-        # Parse and step the action
-        import re as _re
+        # Parse response
         cleaned = _re.sub(r"^```(?:json)?\s*", "", assistant_text.strip(), flags=_re.IGNORECASE)
         cleaned = _re.sub(r"\s*```$", "", cleaned).strip()
         try:
@@ -287,12 +344,17 @@ def generate_trajectory(
             else:
                 action = {"type": "QUERY_RECORDS", "feature_filter": {}}
 
-        # Ensure "type" key exists (LLMs often use "action" instead)
         if "type" not in action and "action" in action:
             action["type"] = action["action"]
 
         obs, reward, done, info = env.step(action)
         last_result = info.get("query_result", info.get("verification", info))
+
+        # Accumulate any record IDs returned by QUERY_RECORDS
+        new_ids = _extract_record_ids(last_result)
+        for rid in new_ids:
+            if rid not in available_records:
+                available_records.append(rid)
 
         if done:
             break
