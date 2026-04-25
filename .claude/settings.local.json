@@ -3,7 +3,24 @@
     "allow": [
       "Bash(py -3.13 -m pip list)",
       "Bash(py -3.13 -c \"import torch; print\\('torch', torch.__version__\\)\")",
-      "Bash(pip install *)"
+      "Bash(pip install *)",
+      "Bash(python -c \"import site; print\\('\\\\n'.join\\(site.getsitepackages\\(\\) + [site.getusersitepackages\\(\\)]\\)\\)\")",
+      "Bash(pip list *)",
+      "Bash(xargs grep *)",
+      "Bash(python3 -c \"import site; import os; paths = site.getsitepackages\\(\\) + [site.getusersitepackages\\(\\)]; [print\\(p\\) for p in paths if os.path.exists\\(p\\)]\")",
+      "Bash(python3)",
+      "WebFetch(domain:github.com)",
+      "WebSearch",
+      "WebFetch(domain:meta-pytorch.org)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:pypi.org)",
+      "Bash(python -c \"import openenv; import inspect, os; print\\(os.path.dirname\\(inspect.getfile\\(openenv\\)\\)\\)\")",
+      "Bash(pip show *)",
+      "Bash(python -c ' *)",
+      "Bash(python -c \"import openenv_core; import inspect; print\\(inspect.getfile\\(openenv_core\\)\\)\")",
+      "Bash(python -c \"import site; print\\(site.getsitepackages\\(\\)\\)\")",
+      "Bash(python -c \"import sys; print\\(sys.path\\)\")",
+      "Bash(C:/Users/thoma/AppData/Local/Programs/Python/Python313/python.exe -c ' *)"
     ]
   }
 }

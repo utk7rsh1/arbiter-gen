@@ -26,6 +26,14 @@ from pydantic import Field
 from openenv.core import Action, Environment, Observation, State
 
 from .environment import ArbiterEnv  # existing logic stays untouched
+from .rubrics import (
+    BudgetEfficiencyRubric,
+    CausalChainRubric,
+    ConsistencyRubric,
+    IntermediateClaimRubric,
+    RubricResult,
+    TerminalRubric,
+)
 
 
 # ── Typed Models ──────────────────────────────────────────────────────────────
@@ -73,10 +81,10 @@ class ArbiterObservation(Observation):
     level:            int              = 1
     features:         Dict[str, Any]   = Field(default_factory=dict)
     # Populated after step() only
-    query_result:     Optional[Any]    = None
-    verification:     Optional[Any]    = None
-    episode_reward:   Optional[Any]    = None
-    ground_truth:     Optional[Any]    = None
+    query_result:     Optional[Any]         = None
+    verification:     Optional[Any]         = None
+    rubric_scores:    List[RubricResult]     = Field(default_factory=list)
+    ground_truth:     Optional[Any]         = None
 
     model_config = {"extra": "allow"}
 
@@ -120,22 +128,81 @@ class ArbiterEnvironment(Environment):
         raw_obs = self._env.reset(seed=seed)
         return self._to_observation(raw_obs, reward=None, done=False)
 
+    def get_rubrics(self) -> List:
+        """Return a fresh instance of every reward rubric.
+
+        Calling this without running an episode makes rubrics discoverable
+        for trainer UIs and introspection. To ablate a component for an
+        experimental run, remove it here — reward.py is untouched.
+        """
+        return [
+            IntermediateClaimRubric(),
+            CausalChainRubric(),
+            ConsistencyRubric(),
+            BudgetEfficiencyRubric(),
+            TerminalRubric(),
+        ]
+
     def step(
         self,
         action: ArbiterAction,
         timeout_s: Optional[float] = None,
         **kwargs,
     ) -> ArbiterObservation:
-        # Convert typed Action → plain dict that ArbiterEnv.step() expects
         action_dict = action.model_dump(exclude_none=True, exclude={"metadata"})
+        raw_obs, _reward, done, info = self._env.step(action_dict)
 
-        raw_obs, reward, done, info = self._env.step(action_dict)
+        verification = info.get("verification")
 
-        obs = self._to_observation(raw_obs, reward=reward, done=done)
-        obs.query_result   = info.get("query_result")
-        obs.verification   = info.get("verification")
-        obs.episode_reward = info.get("episode_reward")
-        obs.ground_truth   = info.get("ground_truth")
+        if done:
+            ep           = info.get("episode_reward", {})
+            verdict      = info.get("verdict")
+            ground_truth = info.get("ground_truth")
+            # claim_total is the accumulated sum computed step-by-step via reward.py
+            claim_total      = ep.get("claim_reward", 0.0)
+            claimed_chain    = (verdict or {}).get("primary_evidence_chain", [])
+            true_chain       = (ground_truth or {}).get("causal_chain", [])
+            # _consistency_violations is the raw count; consistency_penalty() is called inside the rubric
+            num_violations   = self._env._consistency_violations
+            remaining_budget = raw_obs.get("budget_remaining", 0)
+            decoy_states     = {
+                k: raw_obs.get("hypothesis_flags", {}).get(k, "ACTIVE")
+                for k in ("decoy_a", "decoy_b")
+            }
+        else:
+            verdict = ground_truth = claim_total = None
+            claimed_chain = true_chain = []
+            num_violations = 0
+            remaining_budget = 0
+            decoy_states = {}
+
+        rubric_scores = [
+            IntermediateClaimRubric().evaluate(
+                verification_result=verification,
+                claim_total=claim_total,
+            ),
+            CausalChainRubric().evaluate(
+                claimed_chain=claimed_chain,
+                true_chain=true_chain,
+            ),
+            ConsistencyRubric().evaluate(num_violations=num_violations),
+            BudgetEfficiencyRubric().evaluate(remaining_budget=remaining_budget),
+            TerminalRubric().evaluate(
+                verdict=verdict,
+                anomaly_info=ground_truth,
+                decoy_states=decoy_states,
+            ),
+        ]
+
+        obs = self._to_observation(
+            raw_obs,
+            reward=sum(r.score for r in rubric_scores),
+            done=done,
+        )
+        obs.query_result  = info.get("query_result")
+        obs.verification  = verification
+        obs.ground_truth  = ground_truth
+        obs.rubric_scores = rubric_scores
         return obs
 
     @property
