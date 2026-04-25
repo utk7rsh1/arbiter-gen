@@ -15,6 +15,7 @@ import networkx as nx
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from arbiter.env.environment import ArbiterEnv
+from arbiter.env.dual_env   import DualArbiterEnv
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
 ROOT     = Path(__file__).parent.parent.parent
@@ -74,6 +75,18 @@ _reward_components   = {"claim": 0.0, "counterfactual": 0.0, "tom": 0.0,
 _episode_done        = False
 _verdict_correct     = None
 _current_level       = 3
+
+# ── Dual Auditor (Level 7) global state ────────────────────────────────────────
+_dual_env     = None
+_dual_obs_a   = None
+_dual_obs_b   = None
+_dual_done    = False
+_dual_claims_a: list = []
+_dual_claims_b: list = []
+_dual_reward_a = 0.0
+_dual_reward_b = 0.0
+_dual_divergences = 0
+_dual_step    = 0
 
 # ── Training global state ───────────────────────────────────────────────────────
 _training_process = None
@@ -351,6 +364,7 @@ def _claims_html(claims: list) -> str:
 
 # ── Graph drawing ───────────────────────────────────────────────────────────────
 def draw_graph(render_data: dict) -> plt.Figure:
+    plt.close("all")   # prevent figure accumulation during auto-run
     fig, ax = plt.subplots(figsize=(7, 5))
     fig.patch.set_facecolor("#020617")
     ax.set_facecolor("#020617")
@@ -797,7 +811,7 @@ def build_demo() -> gr.Blocks:
                 # ── Controls row ──
                 with gr.Row():
                     level_radio = gr.Radio(
-                        choices=["L1", "L2", "L3", "L4", "L5"],
+                        choices=["L1", "L2", "L3", "L4", "L5", "L6", "L7"],
                         value="L3", label="Curriculum Level", scale=3,
                     )
                     model_radio = gr.Radio(
@@ -889,6 +903,204 @@ def build_demo() -> gr.Blocks:
                 refresh_btn.click(draw_arms_race_from_files, outputs=[arms_plot])
                 demo.load(draw_arms_race_from_files, outputs=[arms_plot])
 
+            # ── Tab 4: Level 7 — Dual Auditor ──────────────────────────────────
+            with gr.Tab("L7 Dual Auditor"):
+                gr.HTML("""
+                <div style='background:linear-gradient(135deg,#0f172a,#0c1a3a);border:1px solid #1e3a6e;
+                border-radius:12px;padding:16px 24px;margin-bottom:12px;'>
+                  <h2 style='color:#a78bfa;margin:0 0 4px;font-size:1.3rem;'>Level 7 — Dual-Auditor Co-Investigation</h2>
+                  <p style='color:#64748b;margin:0;font-size:0.8rem;'>Two Auditors investigate the same case.
+                  <strong style='color:#60a5fa;'>Collaborative</strong>: claims shared, duplicates earn 0.
+                  <strong style='color:#f87171;'>Competitive</strong>: first correct verdict takes 70%% reward.</p>
+                </div>""")
+
+                with gr.Row():
+                    dual_mode_radio = gr.Radio(
+                        choices=["collaborative", "competitive"],
+                        value="collaborative", label="Mode", scale=2)
+                    dual_seed_num = gr.Number(value=7, label="Seed", precision=0, scale=1)
+                    dual_new_btn  = gr.Button("Start Dual Episode", variant="primary", scale=2)
+
+                dual_status = gr.Markdown("_Click **Start Dual Episode** to begin._")
+
+                with gr.Row():
+                    with gr.Column():
+                        gr.HTML("<div style='color:#60a5fa;font-weight:700;font-size:11px;"
+                                "letter-spacing:1px;text-transform:uppercase;margin-bottom:6px;'"
+                                ">Auditor A</div>")
+                        dual_graph_a = gr.Plot(label="Causal Graph — Auditor A")
+                        dual_claims_a_html = gr.HTML("<div style='color:#334155;font-style:italic;"
+                            "padding:12px;border:1px solid #1e293b;border-radius:8px;'"
+                            ">Auditor A claims will appear here.</div>")
+                        dual_reward_a_html = gr.HTML()
+
+                    with gr.Column():
+                        gr.HTML("<div style='color:#f87171;font-weight:700;font-size:11px;"
+                                "letter-spacing:1px;text-transform:uppercase;margin-bottom:6px;'"
+                                ">Auditor B</div>")
+                        dual_graph_b = gr.Plot(label="Causal Graph — Auditor B")
+                        dual_claims_b_html = gr.HTML("<div style='color:#334155;font-style:italic;"
+                            "padding:12px;border:1px solid #1e293b;border-radius:8px;'"
+                            ">Auditor B claims will appear here.</div>")
+                        dual_reward_b_html = gr.HTML()
+
+                # Shared belief state panel
+                dual_shared_html = gr.HTML()
+
+                with gr.Row():
+                    dual_step_a = gr.Button("Step Auditor A →", variant="secondary")
+                    dual_step_b = gr.Button("Step Auditor B →", variant="secondary")
+                    dual_auto   = gr.Button("Auto-Run Both ▶",  variant="primary")
+
+                dual_timer = gr.Timer(value=1.2, active=False)
+
+                # ── Dual helper functions ──
+                def _dual_shared_html():
+                    if _dual_env is None or _dual_env.shared is None:
+                        return ""
+                    s = _dual_env.shared
+                    divs = ""
+                    for bc in s.broadcast_claims[-6:]:
+                        who   = bc.get("auditor", "?")
+                        col   = "#60a5fa" if who == "A" else "#f87171"
+                        ct    = bc.get("claim_type", "claim").upper()
+                        cause = bc.get("cause_feature", bc.get("subject_record", "—"))
+                        divs += (f"<div style='border-left:3px solid {col};"
+                                 f"padding:4px 10px;margin:3px 0;font-size:11px;background:#0f172a;border-radius:0 6px 6px 0;'>"
+                                 f"<span style='color:{col};font-weight:700;'>Auditor {who}</span> "
+                                 f"<span style='color:#94a3b8;'>[{ct}]</span> "
+                                 f"<span style='color:#e2e8f0;'>{cause}</span></div>")
+                    div_warn = ""
+                    if s.divergence_violations > 0:
+                        div_warn = (f"<div style='background:rgba(239,68,68,0.1);border:1px solid #f87171;"
+                                    f"border-radius:6px;padding:6px 12px;font-size:11px;color:#f87171;"
+                                    f"margin-top:8px;'>⚠ {s.divergence_violations} hypothesis divergence(s) — both auditors penalised -0.5 each</div>")
+                    mode_col = "#60a5fa" if s.mode == "collaborative" else "#f87171"
+                    biased_hint = (f" | Biased auditor: <strong style='color:#fbbf24;'>Auditor {s.biased_auditor}</strong> "
+                                   f"<span style='color:#475569;'>(for trust game — detectable via claim patterns)</span>")
+                    return (
+                        f"<div style='background:#0a1628;border:1px solid #1e3a6e;border-radius:10px;padding:12px;margin-top:8px;'>"
+                        f"<div style='font-size:9px;color:#475569;letter-spacing:1px;font-weight:700;"
+                        f"text-transform:uppercase;margin-bottom:8px;'>Shared Belief State — "
+                        f"<span style='color:{mode_col};'>{s.mode.upper()}</span>{biased_hint}</div>"
+                        f"{divs or '<div style=\'color:#334155;font-size:11px;\'>No shared claims yet.</div>'}"
+                        f"{div_warn}</div>"
+                    )
+
+                def _dual_reward_pill(label, reward, color):
+                    return (f"<div style='background:#0f172a;border:1px solid {color}33;"
+                            f"border-radius:8px;padding:8px 14px;display:inline-block;margin:4px;'>"
+                            f"<div style='font-size:9px;color:#475569;letter-spacing:1px;"
+                            f"text-transform:uppercase;'>{label}</div>"
+                            f"<div style='font-size:22px;font-weight:800;font-family:monospace;"
+                            f"color:{color};'>{reward:+.1f}</div></div>")
+
+                def _dual_new(mode, seed):
+                    global _dual_env, _dual_obs_a, _dual_obs_b, _dual_done
+                    global _dual_claims_a, _dual_claims_b, _dual_reward_a, _dual_reward_b
+                    global _dual_divergences, _dual_step
+                    _dual_env      = DualArbiterEnv(level=7, mode=mode, seed=int(seed) if seed else 7)
+                    _dual_obs_a, _dual_obs_b = _dual_env.reset()
+                    _dual_done     = False
+                    _dual_claims_a = []
+                    _dual_claims_b = []
+                    _dual_reward_a = 0.0
+                    _dual_reward_b = 0.0
+                    _dual_divergences = 0
+                    _dual_step     = 0
+                    return (
+                        draw_graph(_dual_env.env_a.render()),
+                        draw_graph(_dual_env.env_b.render()),
+                        _claims_html([]), _claims_html([]),
+                        _dual_reward_pill("Auditor A", 0.0, "#60a5fa"),
+                        _dual_reward_pill("Auditor B", 0.0, "#f87171"),
+                        _dual_shared_html(),
+                        f"Dual episode started. Mode: **{mode}**. Seed: {seed}.",
+                        gr.update(active=False),
+                    )
+
+                def _dual_do_step(auditor_id: str):
+                    global _dual_obs_a, _dual_obs_b, _dual_done
+                    global _dual_claims_a, _dual_claims_b, _dual_reward_a, _dual_reward_b
+                    global _dual_step
+                    if _dual_env is None or _dual_done:
+                        return None
+                    # Pick action from scripted list (cycle through)
+                    idx    = _dual_step % len(SCRIPTED_ACTIONS)
+                    action = copy.deepcopy(SCRIPTED_ACTIONS[idx])
+                    obs_raw, reward, done, info = _dual_env.step(auditor_id, action)
+                    if auditor_id == "A":
+                        _dual_obs_a   = obs_raw
+                        _dual_reward_a += reward
+                        if action["type"].startswith("CLAIM_"):
+                            _dual_claims_a.append({
+                                "claim_type": action["type"].replace("CLAIM_","").lower(),
+                                "step": _dual_step, "correct": True, "reward_delta": reward,
+                                **action.get("claim", {})
+                            })
+                    else:
+                        _dual_obs_b   = obs_raw
+                        _dual_reward_b += reward
+                        if action["type"].startswith("CLAIM_"):
+                            _dual_claims_b.append({
+                                "claim_type": action["type"].replace("CLAIM_","").lower(),
+                                "step": _dual_step, "correct": True, "reward_delta": reward,
+                                **action.get("claim", {})
+                            })
+                    if done:
+                        _dual_done = True
+                    _dual_step += 1
+
+                _dual_all = [dual_graph_a, dual_graph_b,
+                             dual_claims_a_html, dual_claims_b_html,
+                             dual_reward_a_html, dual_reward_b_html,
+                             dual_shared_html, dual_status, dual_timer]
+
+                def _dual_collect(status_msg, timer_active=False):
+                    ga = draw_graph(_dual_env.env_a.render()) if _dual_env else draw_graph({})
+                    gb = draw_graph(_dual_env.env_b.render()) if _dual_env else draw_graph({})
+                    return (
+                        ga, gb,
+                        _claims_html(_dual_claims_a),
+                        _claims_html(_dual_claims_b),
+                        _dual_reward_pill("Auditor A", _dual_reward_a, "#60a5fa"),
+                        _dual_reward_pill("Auditor B", _dual_reward_b, "#f87171"),
+                        _dual_shared_html(),
+                        status_msg,
+                        gr.update(active=timer_active),
+                    )
+
+                def _dual_step_a_fn():
+                    if _dual_env is None: return _dual_collect("Start a dual episode first.")
+                    _dual_do_step("A")
+                    return _dual_collect(f"Auditor A: step {_dual_step}")
+
+                def _dual_step_b_fn():
+                    if _dual_env is None: return _dual_collect("Start a dual episode first.")
+                    _dual_do_step("B")
+                    return _dual_collect(f"Auditor B: step {_dual_step}")
+
+                def _dual_auto_fn():
+                    if _dual_env is None: return _dual_collect("Start a dual episode first.")
+                    return _dual_collect("Auto-running both auditors...", True)
+
+                def _dual_tick_fn():
+                    if _dual_env is None or _dual_done:
+                        return _dual_collect("Episode complete.", False)
+                    _dual_do_step("A")
+                    _dual_do_step("B")
+                    still = not _dual_done
+                    return _dual_collect(f"Auto step {_dual_step} | A: {_dual_reward_a:+.1f} | B: {_dual_reward_b:+.1f}", still)
+
+                dual_new_btn.click(
+                    fn=_dual_new,
+                    inputs=[dual_mode_radio, dual_seed_num],
+                    outputs=_dual_all)
+                dual_step_a.click(fn=_dual_step_a_fn, outputs=_dual_all)
+                dual_step_b.click(fn=_dual_step_b_fn, outputs=_dual_all)
+                dual_auto.click(fn=_dual_auto_fn,     outputs=_dual_all)
+                dual_timer.tick(fn=_dual_tick_fn,     outputs=_dual_all)
+
             # ── Tab 4: Reference ───────────────────────────────────────────────
             with gr.Tab("Reference"):
                 gr.Markdown("## Action Reference")
@@ -924,6 +1136,12 @@ def build_demo() -> gr.Blocks:
                     "CLAIM_THEORY_OF_MIND":
                         "- `defender_action`, `target_link`, `obfuscation_method`, `confidence`, `basis`\n"
                         "- **+3.0 bonus if fully correct** _(Level 4+ only)_",
+                    "FLAG_SCHEMA_CHANGE":
+                        "- `feature_id` — the newly non-compliant feature detected\n"
+                        "- **+4.0 if correct + within 4 steps of drift; -1.0 if wrong feature** _(Level 6+ only)_",
+                    "CHALLENGE_PARTNER":
+                        "- `claimed_bias_type` — e.g. `\"type1_overfit\"`\n"
+                        "- **+3.0 if correct identification of biased partner; -1.0 if wrong** _(Level 7 only)_",
                     "SUBMIT_REPORT":
                         "- `anomaly_type`, `primary_evidence_chain`, `affected_demographic`, `recommended_action`\n"
                         "- **Terminal action — ends episode and triggers full reward.**",

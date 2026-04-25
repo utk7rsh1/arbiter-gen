@@ -31,3 +31,13 @@ NUM_DECISIONS         = 45
 
 # --- Defender ---
 DEFENDER_ADAPT_EVERY = 50   # episodes between frequency-table updates
+
+# --- Level 6 Schema Drift ---
+REWARD_SCHEMA_CHANGE_CORRECT = 4.0
+REWARD_SCHEMA_MISSED_PENALTY = -2.0
+
+# --- Level 7 Dual Auditor ---
+REWARD_BIAS_DETECT_CORRECT = 3.0
+REWARD_CHALLENGE_WRONG     = -1.0
+DUAL_COMPETITIVE_FIRST_SHARE  = 0.70
+DUAL_COMPETITIVE_SECOND_SHARE = 0.30
