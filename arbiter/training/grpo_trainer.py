@@ -52,6 +52,8 @@ torch.manual_seed(args.seed)
 np.random.seed(args.seed)
 
 # ── Load model ─────────────────────────────────────────────────────────────────
+import copy
+
 print(f"Loading model from {args.checkpoint}...")
 try:
     from unsloth import FastLanguageModel
@@ -70,6 +72,15 @@ except Exception:
     UNSLOTH = False
 
 tokenizer.pad_token = tokenizer.eos_token
+
+# ── Frozen reference model (SFT policy) ────────────────────────────────────────
+# Deep-copy before any GRPO updates so KL is computed against the true SFT init.
+print("Creating frozen reference model copy...")
+ref_model = copy.deepcopy(model)
+for p in ref_model.parameters():
+    p.requires_grad = False
+ref_model.eval()
+print("Reference model frozen.")
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 SYSTEM_PROMPT = """You are an expert AI auditor. Output exactly one JSON action per turn.
@@ -165,11 +176,12 @@ def run_episode(env: ArbiterEnv, seed: int, terminal_only: bool = False
     return episode_reward, step_rewards, trajectory
 
 
-def grpo_update(model, optimizer, trajectories: List[List[Dict]], kl_coef: float):
+def grpo_update(model, ref_model, optimizer, trajectories: List[List[Dict]], kl_coef: float):
     """
-    Simplified GRPO update:
-    - Compute advantage = reward - mean(batch_rewards) for each token
-    - Update policy with KL penalty against SFT reference
+    GRPO update:
+    - Advantage = (ep_reward - mean) / std  (normalised across the batch)
+    - KL penalty computed against the FROZEN SFT reference model
+    - Loss = -advantage * mean(log_prob) + kl_coef * KL(ref || policy)
     """
     if not trajectories:
         return 0.0
@@ -190,18 +202,21 @@ def grpo_update(model, optimizer, trajectories: List[List[Dict]], kl_coef: float
 
             tokens = tokenizer(action_text, return_tensors="pt",
                                max_length=200, truncation=True).to(device)
+
+            # Reference logits — frozen SFT copy, no grad
             with torch.no_grad():
-                ref_logits = model(**tokens).logits
+                ref_logits = ref_model(**tokens).logits
+
+            # Policy logits — live model, grad enabled
             train_logits = model(**tokens).logits
 
-            # Policy gradient loss with advantage weighting
-            log_probs = torch.nn.functional.log_softmax(train_logits, dim=-1)
-            ref_log_probs = torch.nn.functional.log_softmax(ref_logits, dim=-1)
+            log_probs     = torch.nn.functional.log_softmax(train_logits, dim=-1)
+            ref_log_probs = torch.nn.functional.log_softmax(ref_logits,   dim=-1)
 
-            # Token-level KL
+            # Forward KL: KL(ref || policy) = sum ref * (log_ref - log_policy)
             kl = (ref_log_probs.exp() * (ref_log_probs - log_probs)).sum(-1).mean()
 
-            # GRPO objective: maximize advantage, minimize KL
+            # GRPO objective
             loss = -advantage * log_probs.mean() + kl_coef * kl
             total_loss += loss.item()
             loss.backward()
@@ -249,7 +264,7 @@ for ep in range(args.episodes):
     defender_log.append(evasion)
 
     # GRPO update
-    loss = grpo_update(model, optimizer, batch_trajs, kl_coef=args.kl_coef)
+    loss = grpo_update(model, ref_model, optimizer, batch_trajs, kl_coef=args.kl_coef)
 
     # Curriculum check
     new_level = curriculum.record(mean_ep_reward)
