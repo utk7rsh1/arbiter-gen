@@ -44,8 +44,19 @@ except ImportError:
     print("Unsloth not available. Falling back to standard transformers + TRL.")
     UNSLOTH = False
 
-# trl imports — always unconditional so SFTConfig is always in scope
-from trl import SFTTrainer, SFTConfig, DataCollatorForCompletionOnlyLM  # noqa
+# trl imports — handle multiple TRL versions
+from trl import SFTTrainer, SFTConfig
+try:
+    from trl import DataCollatorForCompletionOnlyLM
+    _HAS_COLLATOR = True
+except ImportError:
+    try:
+        from trl.trainer.utils import DataCollatorForCompletionOnlyLM
+        _HAS_COLLATOR = True
+    except ImportError:
+        _HAS_COLLATOR = False
+        print("[INFO] DataCollatorForCompletionOnlyLM not available in this TRL version."
+              " Training without response-only loss masking (still works fine).")
 from datasets import Dataset
 import torch
 import transformers
@@ -132,14 +143,15 @@ dataset = Dataset.from_list(records)
 dataset = dataset.train_test_split(test_size=0.05, seed=42)
 print(f"  Train: {len(dataset['train'])}  Eval: {len(dataset['test'])}")
 
-# ── Loss masking — response tokens only ───────────────────────────────────────
-# Encode response template to token IDs — raw string matching fails on
-# Qwen2's tokenizer in trl 0.19.x, token ID list works reliably.
-response_template_ids = tokenizer.encode(RESPONSE_TEMPLATE, add_special_tokens=False)
-collator = DataCollatorForCompletionOnlyLM(
-    response_template=response_template_ids,
-    tokenizer=tokenizer,
-)
+# ── Loss masking — response tokens only ─────────────────────────────────────
+if _HAS_COLLATOR:
+    response_template_ids = tokenizer.encode(RESPONSE_TEMPLATE, add_special_tokens=False)
+    collator = DataCollatorForCompletionOnlyLM(
+        response_template=response_template_ids,
+        tokenizer=tokenizer,
+    )
+else:
+    collator = None   # fall back: loss computed on full sequence
 
 # ── Training config ───────────────────────────────────────────────────────────
 # warmup_ratio removed in trl 0.19.x — use warmup_steps.
