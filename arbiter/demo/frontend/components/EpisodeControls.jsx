@@ -9,12 +9,15 @@ window.EpisodeControls = function EpisodeControls({
   onStep, onPause, onReset,
   activeTab, onTabChange,
   serverStatus,
+  domainLabel,
+  onBackToLanding,
+  onChangeDomain,
 }) {
-  const levels = ['L1','L2','L3','L4','L5'];
+  const levels = ['L1','L2','L3','L4','L5','L6','L7'];
   const models = ['UNTRAINED', 'SFT ONLY', 'FULL ARBITER'];
   const speeds = ['MANUAL','1×','2×','5×'];
-  const tabs   = ['LIVE DEMO', 'ARMS RACE', 'COMPARISON', 'STATS'];
-  const tabIds = ['LIVE', 'ARMS_RACE', 'COMPARISON', 'STATS'];
+  const tabs   = ['LIVE DEMO', 'ARMS RACE', 'COMPARISON', 'STATS', 'TRAINING'];
+  const tabIds = ['LIVE', 'ARMS_RACE', 'COMPARISON', 'STATS', 'TRAINING'];
 
   const progressPct = maxSteps > 0 ? Math.round((step / maxSteps) * 100) : 0;
 
@@ -51,11 +54,23 @@ window.EpisodeControls = function EpisodeControls({
           </div>
         </div>
 
-        {/* Right: model badge + session */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+        {/* Right: domain label + model badge */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+          {domainLabel && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <span style={{ fontFamily: 'var(--font-mono)', fontSize: '10px', color: 'var(--text-muted)', letterSpacing: '0.08em' }}>DOMAIN:</span>
+              <span style={{ fontFamily: 'var(--font-mono)', fontSize: '11px', color: 'var(--cyan)', fontWeight: 500, maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{domainLabel}</span>
+              {onChangeDomain && (
+                <button onClick={onChangeDomain} style={{ background: 'none', border: '1px solid var(--border-light)', borderRadius: 999, padding: '2px 10px', fontFamily: 'var(--font-mono)', fontSize: '10px', color: 'var(--text-muted)', cursor: 'pointer' }}>change</button>
+              )}
+            </div>
+          )}
           <span className="model-badge">
             {modelMode === 'FULL ARBITER' ? '⚡ ' : ''}{modelMode}
           </span>
+          {onBackToLanding && (
+            <button onClick={onBackToLanding} title="Back to Landing" style={{ background: 'none', border: '1px solid var(--border-light)', borderRadius: 999, padding: '4px 12px', fontFamily: 'var(--font-body)', fontSize: '12px', color: 'var(--text-secondary)', cursor: 'pointer' }}>← Home</button>
+          )}
         </div>
       </div>
 

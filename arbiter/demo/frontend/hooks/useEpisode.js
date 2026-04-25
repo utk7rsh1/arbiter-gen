@@ -47,7 +47,7 @@ window.useEpisode = function useEpisode(backend) {
   useEffect(() => { checkHealth(); }, [checkHealth]);
 
   // ── New session ───────────────────────────────────────────────────────────────
-  const newSession = useCallback(async (level, seed, checkpoint) => {
+  const newSession = useCallback(async (level, seed, checkpoint, domainJson) => {
     if (runIntervalRef.current) clearInterval(runIntervalRef.current);
     setIsRunning(false);
     setIsDone(false);
@@ -66,7 +66,7 @@ window.useEpisode = function useEpisode(backend) {
       h3: { label: 'MODEL DRIFT',    type: 'model_drift',          status: 'ACTIVE' },
     });
     try {
-      const sess = await backend.createSession(level, seed, checkpoint);
+      const sess = await backend.createSession(level, seed, checkpoint, domainJson || null);
       const sid = sess.session_id;
       setSessionId(sid);
       const obs = await backend.resetSession(sid, seed);

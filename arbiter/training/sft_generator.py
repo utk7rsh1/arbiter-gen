@@ -144,7 +144,7 @@ Queried so far   : {queried_nodes}
 Claims made      : {num_claims}
 Hypotheses       : {hypothesis_flags}
 Available records: {available_records}
-
+{schema_alert_line}
 Last query result:
 {last_result}
 

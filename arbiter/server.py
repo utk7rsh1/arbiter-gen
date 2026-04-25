@@ -24,17 +24,23 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 import time
 
 from arbiter.env.environment import (
     ArbiterEnv, create_session, get_session, list_sessions
 )
+try:
+    from arbiter.env.domain_config import DomainConfig
+    _HAS_DOMAIN_CONFIG = True
+except ImportError:
+    _HAS_DOMAIN_CONFIG = False
 from arbiter.env.dual_env import (
     DualArbiterEnv, create_dual_session, get_dual_session, list_dual_sessions
 )
+from arbiter.env.domain_config import DomainConfig
 try:
-    from arbiter.env.openenv_wrapper import ArbiterEnvironment, ArbiterAction, ArbiterObservation
+    from arbiter.env.openenv_wrapper import ArbiterEnvironment, ArbiterAction
     _HAS_OPENENV_WRAPPER = True
 except ImportError:
     _HAS_OPENENV_WRAPPER = False
@@ -89,9 +95,28 @@ _global_stats: Dict[str, Any] = {
 
 # ── Schemas ────────────────────────────────────────────────────────────────────
 
+def _parse_domain(domain_json: Optional[Dict]) -> Optional["DomainConfig"]:
+    """Deserialise a plain dict into a DomainConfig, or return None."""
+    if not domain_json:
+        return None
+    if not _HAS_DOMAIN_CONFIG:
+        raise HTTPException(status_code=501, detail="DomainConfig module not available")
+    try:
+        from arbiter.env.domain_config import DomainConfig
+        return DomainConfig(**domain_json)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid domain_json: {exc}")
+
+
+class GenerateDomainRequest(BaseModel):
+    description: str
+    seed: int = 42
+
+
 class CreateSessionRequest(BaseModel):
     level: int = 1
     seed: Optional[int] = None
+    domain_json: Optional[Dict[str, Any]] = None
 
 
 class ResetRequest(BaseModel):
@@ -115,9 +140,35 @@ def health():
     return {"status": "ok", "uptime_s": round(time.time() - _global_start, 1)}
 
 
+@app.post("/generate-domain")
+def generate_domain_endpoint(req: GenerateDomainRequest):
+    """
+    Generate a DomainConfig from a plain-English description via Groq.
+    Returns the full DomainConfig as JSON so the frontend can display
+    and edit it before starting a session.
+    """
+    import os
+    groq_key = os.environ.get("GROQ_API_KEY")
+    if not groq_key:
+        raise HTTPException(
+            status_code=503,
+            detail="GROQ_API_KEY not set on the server. Set the environment variable and restart."
+        )
+    try:
+        from arbiter.env.groq_generator import GroqGraphGenerator
+        gen    = GroqGraphGenerator(api_key=groq_key)
+        config = gen.generate_cached(req.description, seed=req.seed)
+        return config.model_dump()
+    except ImportError:
+        raise HTTPException(status_code=501, detail="groq package not installed (pip install groq)")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Domain generation failed: {exc}")
+
+
 @app.post("/sessions", response_model=SessionResponse)
 def create_session_endpoint(req: CreateSessionRequest):
-    sid = create_session(level=req.level, seed=req.seed)
+    domain = _parse_domain(req.domain_json)
+    sid = create_session(level=req.level, seed=req.seed, domain=domain)
     _global_stats["total_sessions"] += 1
     return {"session_id": sid, "level": req.level, "created": time.time()}
 
@@ -194,6 +245,140 @@ def global_metrics():
     }
 
 
+@app.get("/arms-race")
+def arms_race_endpoint():
+    """
+    Return training episode data from grpo_training.jsonl as chart-ready points.
+    Each point: { ep, auditor (mean_reward), defender (defender_evasion * 100) }
+    """
+    import pathlib
+    log_path = pathlib.Path(__file__).parent.parent / "logs" / "grpo_training.jsonl"
+    data = []
+    try:
+        with open(log_path) as f:
+            for line in f:
+                try:
+                    e = __import__("json").loads(line)
+                    data.append({
+                        "ep":       e.get("episode", len(data)),
+                        "auditor":  round(float(e.get("mean_reward", 0)), 2),
+                        "defender": round(float(e.get("defender_evasion", 0)) * 100, 1),
+                    })
+                except Exception:
+                    pass
+    except FileNotFoundError:
+        pass
+    return {"data": data, "count": len(data)}
+
+
+@app.get("/training-log")
+def training_log_endpoint(last: int = 100):
+    """Return the last N lines of the GRPO training stdout log."""
+    import pathlib
+    log_path = pathlib.Path(__file__).parent.parent / "logs" / "grpo_stdout.log"
+    lines = []
+    try:
+        with open(log_path) as f:
+            lines = f.readlines()
+    except FileNotFoundError:
+        pass
+    return {"lines": [l.rstrip() for l in lines[-last:]], "total": len(lines)}
+
+
+# ── Training subprocess management ────────────────────────────────────────────
+
+_training_proc: Optional[Any] = None
+_training_log_buffer: list = []
+
+
+class StartTrainingRequest(BaseModel):
+    checkpoint: str = "lora_sft_v4"
+    level:      int = 3
+    episodes:   int = 120
+    output:     str = "lora_grpo_v2"
+    kl_coef:    float = 0.1
+    lr:         float = 5e-6
+
+
+@app.post("/training/start")
+def training_start_endpoint(req: StartTrainingRequest):
+    """Launch the GRPO trainer as a subprocess (mirrors Gradio training tab)."""
+    import pathlib, subprocess, threading, sys as _sys
+    global _training_proc, _training_log_buffer
+    if _training_proc and _training_proc.poll() is None:
+        return {"status": "already_running", "pid": _training_proc.pid}
+
+    root     = pathlib.Path(__file__).parent.parent
+    log_path = root / "logs" / "grpo_training.jsonl"
+    out_path = root / "logs" / "grpo_stdout.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.unlink(missing_ok=True)
+
+    cmd = [
+        _sys.executable, "-m", "arbiter.training.grpo_trainer",
+        "--checkpoint", str(root / req.checkpoint),
+        "--level",      str(req.level),
+        "--episodes",   str(req.episodes),
+        "--output",     str(root / req.output),
+        "--log_file",   str(log_path),
+        "--kl_coef",    str(req.kl_coef),
+        "--lr",         str(req.lr),
+    ]
+
+    out_file = open(out_path, "w")
+    _training_proc = subprocess.Popen(
+        cmd, cwd=str(root),
+        stdout=out_file, stderr=subprocess.STDOUT
+    )
+    _training_log_buffer = []
+
+    def _watch():
+        _training_proc.wait()
+        out_file.close()
+
+    threading.Thread(target=_watch, daemon=True).start()
+    return {"status": "started", "pid": _training_proc.pid, "cmd": " ".join(cmd)}
+
+
+@app.post("/training/abort")
+def training_abort_endpoint():
+    """Terminate the running GRPO subprocess."""
+    global _training_proc
+    if _training_proc and _training_proc.poll() is None:
+        _training_proc.terminate()
+        return {"status": "aborted", "pid": _training_proc.pid}
+    return {"status": "not_running"}
+
+
+@app.get("/training/status")
+def training_status_endpoint():
+    """Return whether training is running + last entry from the JSONL log."""
+    import pathlib, json as _json
+    global _training_proc
+    running = bool(_training_proc and _training_proc.poll() is None)
+    pid     = _training_proc.pid if _training_proc else None
+    rc      = _training_proc.poll() if _training_proc else None
+
+    log_path = pathlib.Path(__file__).parent.parent / "logs" / "grpo_training.jsonl"
+    last_entry = None
+    try:
+        lines = open(log_path).readlines()
+        if lines:
+            last_entry = _json.loads(lines[-1])
+    except Exception:
+        pass
+
+    return {
+        "running":    running,
+        "pid":        pid,
+        "returncode": rc,
+        "last_entry": last_entry,
+        "total_episodes": last_entry.get("episode", 0) if last_entry else 0,
+    }
+
+
+
+
 @app.get("/leaderboard")
 def leaderboard():
     """Top-10 sessions by mean episode reward."""
@@ -215,9 +400,10 @@ def leaderboard():
 # ── Level 7 — Dual-Auditor Endpoints ─────────────────────────────────────────
 
 class CreateDualSessionRequest(BaseModel):
-    level: int = 7
-    mode:  str = "collaborative"   # "collaborative" or "competitive"
-    seed:  Optional[int] = None
+    level:       int = 7
+    mode:        str = "collaborative"   # "collaborative" or "competitive"
+    seed:        Optional[int] = None
+    domain_json: Optional[Dict[str, Any]] = None
 
 
 class DualStepRequest(BaseModel):
@@ -228,7 +414,8 @@ class DualStepRequest(BaseModel):
 @app.post("/dual-sessions")
 def create_dual_session_endpoint(req: CreateDualSessionRequest):
     """Create a Level-7 dual-auditor session. Returns session_id."""
-    sid = create_dual_session(level=req.level, mode=req.mode, seed=req.seed)
+    domain = _parse_domain(req.domain_json)
+    sid = create_dual_session(level=req.level, mode=req.mode, seed=req.seed, domain=domain)
     _global_stats["total_sessions"] += 1
     return {"session_id": sid, "level": req.level, "mode": req.mode, "created": time.time()}
 

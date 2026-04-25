@@ -232,7 +232,7 @@ class ArbiterEnvironment(Environment):
         reward: Optional[float],
         done: bool,
     ) -> ArbiterObservation:
-        return ArbiterObservation(
+        obs = ArbiterObservation(
             done=done,
             reward=reward,
             step=raw.get("step", 0),
@@ -243,3 +243,10 @@ class ArbiterEnvironment(Environment):
             level=raw.get("level", self._env.curriculum.level),
             features=raw.get("features", {}),
         )
+        # Forward Level 6 schema-change alert and Level 7 dual-auditor overlay
+        # so any auditor AI using the OpenEnv interface sees these signals.
+        _EXTRA_KEYS = ("schema_change_alert", "dual")
+        for key in _EXTRA_KEYS:
+            if raw.get(key):
+                object.__setattr__(obs, key, raw[key])
+        return obs

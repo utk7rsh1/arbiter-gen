@@ -99,7 +99,7 @@ class ArbiterEnv:
 
         # Level 6: apply schema drift
         if self.curriculum.schema_drift_enabled:
-            drift_step = get_drift_step(total_steps=20, seed=self._episode_seed)
+            drift_step = get_drift_step(seed=self._episode_seed)
             ep_data = apply_schema_drift(
                 ep_data,
                 drift_step,
@@ -353,6 +353,15 @@ class ArbiterEnv:
             anomaly_info=self._anomaly_info,
             decoy_states=decoy_states,
         )
+
+        # Level 4+: feed back whether each obfuscation method fooled the Auditor
+        # so the Level-5 adaptive frequency table can learn.
+        if self.curriculum.defender_active and self.defender.action_log:
+            fooled = not result["terminal"]["verdict_correct"]
+            for act in self.defender.action_log:
+                method = act.get("method", "")
+                if method:
+                    self.defender.record_auditor_result(method, fooled=fooled)
 
         # Update aggregate metrics
         self._metrics["episodes_completed"] += 1

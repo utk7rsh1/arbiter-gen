@@ -25,16 +25,14 @@ import json
 import os
 import re
 import sys
-import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 import numpy as np
 import torch
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from arbiter.env.environment import ArbiterEnv
-from arbiter.env.curriculum   import Curriculum
 
 # ── Module-level constants (safe to import) ────────────────────────────────────
 
@@ -111,12 +109,21 @@ def generate_action(
         messages.append({"role": "user",      "content": h["obs_text"]})
         messages.append({"role": "assistant", "content": h["action_text"]})
 
+    features     = obs.get("features", {})
+    explicit_fs  = list(features.get("explicit", []))
+    proxy_fs     = list(features.get("proxy", []))
+    schema_alert = obs.get("schema_change_alert")
+    dual_state   = obs.get("dual", {})
+
     obs_text = (
         f"Step {obs.get('step', 0)}/20 | Budget: {obs.get('budget_remaining', 20)} | "
         f"Claims: {obs.get('num_claims', 0)} | Level: {obs.get('level', 1)}\n"
         f"Hypothesis flags: {obs.get('hypothesis_flags', {})}\n"
-        f"Features: {list(obs.get('features', {}).get('explicit', []))}\n"
-        f"Output your next JSON action:"
+        f"Explicit features: {explicit_fs}\n"
+        f"Proxy features: {proxy_fs}\n"
+        + (f"SCHEMA CHANGE ALERT: {schema_alert}\n" if schema_alert else "")
+        + (f"Partner state: {dual_state}\n" if dual_state else "")
+        + "Output your next JSON action:"
     )
     messages.append({"role": "user", "content": obs_text})
 
@@ -328,6 +335,15 @@ def main():
     env        = ArbiterEnv(level=args.level, seed=args.seed, domain=_domain)
     curriculum = env.curriculum
 
+    # Build a domain-aware system prompt so the model sees the right feature
+    # names and outcome labels during GRPO training on custom domains.
+    if _domain is not None:
+        from arbiter.training.sft_generator import build_system_prompt
+        _system_prompt = build_system_prompt(_domain)
+        print(f"Using domain-specific system prompt for: {_domain.domain_name}")
+    else:
+        _system_prompt = SYSTEM_PROMPT
+
     optimizer = torch.optim.AdamW(
         [p for p in model.parameters() if p.requires_grad], lr=args.lr)
 
@@ -350,6 +366,7 @@ def main():
             ep_reward, step_rews, traj = run_episode(
                 env, seed=seed, terminal_only=args.terminal_only,
                 model=model, tokenizer=tokenizer, device=device,
+                system_prompt=_system_prompt,
             )
             batch_trajs.append(traj)
             batch_rewards.append(ep_reward)

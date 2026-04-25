@@ -31,8 +31,10 @@ window.useBackend = function useBackend() {
     }
   }, []);
 
-  const createSession = useCallback(async (level = 1, seed = null, checkpoint = 'base') => {
-    return call('POST', `/sessions?checkpoint=${checkpoint}`, { level, seed });
+  const createSession = useCallback(async (level = 1, seed = null, checkpoint = 'base', domainJson = null) => {
+    const body = { level, seed };
+    if (domainJson) body.domain_json = domainJson;
+    return call('POST', `/sessions?checkpoint=${checkpoint}`, body);
   }, [call]);
 
   const resetSession = useCallback(async (sessionId, seed = null) => {

@@ -210,15 +210,19 @@ class DomainConfig(BaseModel):
         if self.seasonal_decoy_feature is None and continuous_explicit:
             object.__setattr__(self, "seasonal_decoy_feature", continuous_explicit[0].name)
 
-        # seasonal_decoy_secondary_feature: second continuous explicit (or same as primary)
+        # seasonal_decoy_secondary_feature: any continuous explicit feature != primary.
+        # Scan the full list so domains with only 1 continuous feature don't silently
+        # assign primary == secondary (which makes Decoy A double-inflate one feature).
         if self.seasonal_decoy_secondary_feature is None:
-            candidate = continuous_explicit[1] if len(continuous_explicit) > 1 else (
-                continuous_explicit[0] if continuous_explicit else None
+            candidate = next(
+                (f for f in continuous_explicit if f.name != self.seasonal_decoy_feature),
+                None,
             )
-            if candidate and candidate.name != self.seasonal_decoy_feature:
-                object.__setattr__(self, "seasonal_decoy_secondary_feature", candidate.name)
-            elif continuous_explicit:
-                object.__setattr__(self, "seasonal_decoy_secondary_feature", continuous_explicit[0].name)
+            # Only fall back to the primary feature when there is genuinely no alternative.
+            fallback = continuous_explicit[0] if continuous_explicit else None
+            secondary = candidate if candidate is not None else fallback
+            if secondary is not None:
+                object.__setattr__(self, "seasonal_decoy_secondary_feature", secondary.name)
 
         # legitimate_risk_feature: third continuous explicit (fallback to second, then first)
         if self.legitimate_risk_feature is None and continuous_explicit:

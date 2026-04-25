@@ -20,7 +20,9 @@
       "Bash(python -c \"import openenv_core; import inspect; print\\(inspect.getfile\\(openenv_core\\)\\)\")",
       "Bash(python -c \"import site; print\\(site.getsitepackages\\(\\)\\)\")",
       "Bash(python -c \"import sys; print\\(sys.path\\)\")",
-      "Bash(C:/Users/thoma/AppData/Local/Programs/Python/Python313/python.exe -c ' *)"
+      "Bash(C:/Users/thoma/AppData/Local/Programs/Python/Python313/python.exe -c ' *)",
+      "Bash(python -m pytest tests/ -v --tb=short --ignore=tests/test_level_generalization.py)",
+      "Bash(python -m pytest tests/ -v --tb=short)"
     ]
   }
 }

@@ -75,25 +75,45 @@ def _generate_seasonal_variation_decoy(
     window_start = 0.35
     window_end   = 0.60
 
+    # Compute adaptive threshold and inflation delta from observed data so the
+    # decoy is calibrated to the actual feature scale (fixes hardcoded 0.45 /
+    # 0.15 / 0.95 that only made sense for the loan debt_ratio 0-1 range).
+    secondary_vals = [
+        r["feature_vector"][secondary_feat]
+        for r in records
+        if isinstance(r["feature_vector"].get(secondary_feat), (int, float))
+    ]
+    if secondary_vals:
+        secondary_vals_sorted = sorted(secondary_vals)
+        n_vals = len(secondary_vals_sorted)
+        # 45th-percentile cutoff — records above this get denied in the window.
+        denial_threshold = secondary_vals_sorted[int(n_vals * 0.45)]
+        obs_range = secondary_vals_sorted[-1] - secondary_vals_sorted[0]
+        # Inflation delta: 15% of observed range, minimum one resolution step.
+        inflation_delta = max(obs_range * 0.15, 1e-6)
+        max_val = secondary_vals_sorted[-1]
+    else:
+        denial_threshold = 0.45   # loan-domain fallback
+        inflation_delta  = 0.15
+        max_val          = 0.95
+
     affected = []
     for r in records:
         if window_start <= r["timestamp"] <= window_end:
             fv = r["feature_vector"].copy()
 
-            # Inflate primary seasonal feature
+            # Inflate primary seasonal feature (proportional — already scale-agnostic)
             if primary_feat in fv and isinstance(fv[primary_feat], (int, float)):
-                raw = fv[primary_feat] * 1.4
-                # Clamp to value_range if available
-                fv[primary_feat] = raw   # downstream clamping left to the model
+                fv[primary_feat] = fv[primary_feat] * 1.4
 
-            # Inflate secondary feature (drives denials)
+            # Inflate secondary feature by a data-derived delta, clamp to observed max
             if secondary_feat in fv and isinstance(fv[secondary_feat], (int, float)):
-                fv[secondary_feat] = min(fv[secondary_feat] + 0.15, 0.95)
+                fv[secondary_feat] = min(fv[secondary_feat] + inflation_delta, max_val)
 
             r["feature_vector"] = fv
 
-            # Higher secondary value -> denial
-            if fv.get(secondary_feat, 0) > 0.45:
+            # Higher secondary value -> denial (threshold derived from data)
+            if fv.get(secondary_feat, 0) > denial_threshold:
                 r["outcome"] = negative_outcome
 
             affected.append(r["id"])

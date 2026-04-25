@@ -1,76 +1,111 @@
-// App.jsx — Root component: BioSync-inspired master grid layout with tab routing
-
-(function() {
+// App.jsx — Root: Landing → (Loan or DomainBuilder) → Episode
+(function () {
   const { useState, useCallback, useEffect, useRef } = React;
 
   function App() {
-    // ── Global UI state ─────────────────────────────────────────────
+    // ── Screen routing: 'landing' | 'domain_builder' | 'episode' ──────────
+    const [screen, setScreen]       = useState('landing');
+    const [domainMode, setDomainMode] = useState('loan');   // 'loan' | 'custom'
+    const [customDomain, setCustomDomain] = useState(null); // DomainConfig JSON
+
+    // ── Episode UI state ──────────────────────────────────────────────────
     const [activeTab, setActiveTab] = useState('LIVE');
-    const [level,     setLevel]     = useState('L1');
+    const [level,     setLevel]     = useState(1);
     const [modelMode, setModelMode] = useState('UNTRAINED');
     const [seed,      setSeed]      = useState(42);
     const [speed,     setSpeed]     = useState('MANUAL');
     const [judgeView, setJudgeView] = useState(true);
+    const [domainLabel, setDomainLabel] = useState('Loan Approval');
 
-    // ── Backend + Episode hooks ─────────────────────────────────────
     const backend = window.useBackend();
     const episode = window.useEpisode(backend);
 
-    // ── Checkpoint map ──────────────────────────────────────────────
     const checkpointFor = (model) => {
-      if (model === 'SFT ONLY')      return 'lora_sft';
-      if (model === 'FULL ARBITER')  return 'lora_grpo';
+      if (model === 'SFT ONLY')     return 'lora_sft';
+      if (model === 'FULL ARBITER') return 'lora_grpo';
       return 'base';
     };
 
-    // ── Actions ─────────────────────────────────────────────────────
+    // ── Landing: Loan selected ─────────────────────────────────────────────
+    const handleSelectLoan = () => {
+      setDomainMode('loan');
+      setCustomDomain(null);
+      setLevel(1);
+      setScreen('episode');
+    };
+
+    // ── Landing: Custom domain selected ────────────────────────────────────
+    const handleSelectCustom = () => {
+      setDomainMode('custom');
+      setScreen('domain_builder');
+    };
+
+    // ── DomainBuilder: user finished configuring, launch episode ──────────
+    const handleDomainLaunch = useCallback(({ domainJson, level: lvl, seed: s }) => {
+      setCustomDomain(domainJson);
+      setLevel(lvl);
+      setSeed(s);
+      setDomainMode('custom');
+      setDomainLabel(domainJson?.domain_name || 'Custom Domain');
+      setScreen('episode');
+    }, []);
+
+    // ── Episode: reset/start session ──────────────────────────────────────
     const handleReset = useCallback(() => {
-      const levelNum = parseInt(level.replace('L','')) || 1;
-      episode.newSession(levelNum, seed, checkpointFor(modelMode));
-    }, [level, seed, modelMode, episode]);
+      const levelNum = typeof level === 'number' ? level : (parseInt((level + '').replace('L', '')) || 1);
+      const domainJson = domainMode === 'custom' ? customDomain : null;
+      episode.newSession(levelNum, seed, checkpointFor(modelMode), domainJson);
+    }, [level, seed, modelMode, episode, domainMode, customDomain]);
+
+    // Auto-start session when screen becomes 'episode' (only for Live tab)
+    useEffect(() => {
+      if (screen === 'episode') {
+        setTimeout(handleReset, 200);
+        const lbl = domainMode === 'custom' && customDomain
+          ? (customDomain.domain_name || 'Custom Domain')
+          : 'Loan Approval';
+        setDomainLabel(lbl);
+      }
+    }, [screen]);
 
     const handleStep = useCallback(() => {
       if (speed === 'MANUAL') {
         episode.doStep();
       } else {
-        const s = speed.replace('×','x');
-        if (episode.isRunning) {
-          episode.stopAuto();
-        } else {
-          episode.startAuto(s);
-        }
+        const s = speed.replace('×', 'x');
+        if (episode.isRunning) episode.stopAuto();
+        else episode.startAuto(s);
       }
     }, [speed, episode]);
 
-    const handlePause = useCallback(() => {
-      episode.stopAuto();
-    }, [episode]);
+    const handlePause = useCallback(() => episode.stopAuto(), [episode]);
 
-    // ── Speed changes restart auto-run ──────────────────────────────
     useEffect(() => {
       if (episode.isRunning && speed !== 'MANUAL') {
-        const s = speed.replace('×', 'x');
-        episode.startAuto(s);
+        episode.startAuto(speed.replace('×', 'x'));
       }
     }, [speed]);
 
-    // ── Keyboard shortcuts ──────────────────────────────────────────
+    // Keyboard shortcuts (only in episode screen, not on training tab)
     useEffect(() => {
+      if (screen !== 'episode') return;
       const handler = (e) => {
-        if (e.target.tagName === 'INPUT') return;
+        if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
         if (e.key === '1') setActiveTab('LIVE');
         if (e.key === '2') setActiveTab('ARMS_RACE');
         if (e.key === '3') setActiveTab('COMPARISON');
         if (e.key === '4') setActiveTab('STATS');
+        if (e.key === '5') setActiveTab('TRAINING');
         if (e.key === 'j') setJudgeView(v => !v);
-        if (e.key === ' ') { e.preventDefault(); handleStep(); }
-        if (e.key === 'r') handleReset();
+        if (e.key === ' ' && activeTab !== 'TRAINING') { e.preventDefault(); handleStep(); }
+        if (e.key === 'r' && activeTab !== 'TRAINING') handleReset();
+        if (e.key === 'Escape') setScreen('landing');
       };
       window.addEventListener('keydown', handler);
       return () => window.removeEventListener('keydown', handler);
-    }, [handleStep, handleReset]);
+    }, [screen, activeTab, handleStep, handleReset]);
 
-    // ── Tab content transition ──────────────────────────────────────
+    // Tab content fade
     const [tabVisible, setTabVisible] = useState(true);
     const prevTab = useRef(activeTab);
     useEffect(() => {
@@ -87,13 +122,33 @@
       transition: 'opacity 0.2s ease-out, transform 0.2s ease-out',
     };
 
-    // ── Layout ──────────────────────────────────────────────────────
+    // ── LANDING ────────────────────────────────────────────────────────────
+    if (screen === 'landing') {
+      return (
+        <window.LandingScreen
+          onSelectLoan={handleSelectLoan}
+          onSelectCustom={handleSelectCustom}
+        />
+      );
+    }
+
+    // ── DOMAIN BUILDER ─────────────────────────────────────────────────────
+    if (screen === 'domain_builder') {
+      return (
+        <window.DomainBuilder
+          onLaunch={handleDomainLaunch}
+          onBack={() => setScreen('landing')}
+        />
+      );
+    }
+
+    // ── EPISODE (LIVE / ARMS RACE / COMPARISON / STATS) ────────────────────
     return (
       <div id="app-root" style={{ height: '100vh', display: 'flex', flexDirection: 'column', overflow: 'hidden', background: 'var(--bg-shell)' }}>
 
-        {/* Topbar + Controls Strip */}
+        {/* Topbar + Controls Strip — now with domain label + back button */}
         <window.EpisodeControls
-          level={level}            onLevelChange={setLevel}
+          level={'L' + level}      onLevelChange={l => setLevel(parseInt(l.replace('L','')) || 1)}
           modelMode={modelMode}    onModelChange={setModelMode}
           seed={seed}              onSeedChange={setSeed}
           speed={speed}            onSpeedChange={setSpeed}
@@ -105,18 +160,21 @@
           onReset={handleReset}
           activeTab={activeTab}    onTabChange={setActiveTab}
           serverStatus={episode.serverStatus}
+          domainLabel={domainLabel}
+          onBackToLanding={() => setScreen('landing')}
+          onChangeDomain={domainMode === 'custom'
+            ? () => setScreen('domain_builder')
+            : handleSelectCustom}
         />
 
-        {/* Main content area */}
+        {/* Main content */}
         <div style={{ flex: 1, overflow: 'hidden', padding: '16px 24px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
           <div style={{ ...contentStyle, flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', gap: '16px' }}>
 
-            {/* ── LIVE DEMO TAB ───────────────────────────────────────── */}
+            {/* LIVE */}
             {activeTab === 'LIVE' && (
               <>
-                {/* Main content: 58% graph / 42% right column */}
                 <div style={{ flex: 1, display: 'flex', gap: '16px', minHeight: 0 }}>
-                  {/* Left: Causal Graph dark panel (58%) */}
                   <div style={{ flex: '0 0 58%', display: 'flex', flexDirection: 'column', gap: '16px', minWidth: 0 }}>
                     <div style={{ flex: 1, minHeight: 0 }}>
                       <window.CausalGraph
@@ -130,17 +188,10 @@
                       />
                     </div>
                   </div>
-
-                  {/* Right column (42%): Claim Chain + Reward + Hypothesis */}
                   <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '16px', minWidth: 0 }}>
-                    {/* Claim chain (55%) */}
                     <div style={{ flex: '0 0 55%', minHeight: 0 }}>
-                      <window.ClaimChain
-                        claims={episode.claims}
-                        overseers={episode.overseers}
-                      />
+                      <window.ClaimChain claims={episode.claims} overseers={episode.overseers} />
                     </div>
-                    {/* Reward panel (25%) */}
                     <div style={{ flex: '0 0 25%', minHeight: 0 }}>
                       <window.RewardPanel
                         reward={episode.reward}
@@ -148,14 +199,11 @@
                         episodeReward={episode.episodeReward}
                       />
                     </div>
-                    {/* Hypothesis tracker (20%) */}
                     <div style={{ flex: 1, minHeight: 0 }}>
                       <window.HypothesisTracker hypotheses={episode.hypotheses} />
                     </div>
                   </div>
                 </div>
-
-                {/* Bottom metric strip */}
                 <div style={{ flexShrink: 0 }}>
                   <window.BottomMetrics
                     step={episode.step}
@@ -164,31 +212,34 @@
                     reward={episode.reward}
                     budget={episode.budget}
                     maxBudget={20}
-                    level={level}
+                    level={'L' + level}
                     episodeHistory={episode.episodeHistory}
                   />
                 </div>
               </>
             )}
 
-            {/* ── ARMS RACE TAB ───────────────────────────────────────── */}
             {activeTab === 'ARMS_RACE' && (
               <div style={{ flex: 1, minHeight: 0 }}>
                 <window.ArmsRaceChart />
               </div>
             )}
 
-            {/* ── COMPARISON TAB ──────────────────────────────────────── */}
             {activeTab === 'COMPARISON' && (
               <div style={{ flex: 1, minHeight: 0 }}>
                 <window.ContrastPanel />
               </div>
             )}
 
-            {/* ── STATS TAB ──────────────────────────────────────────── */}
             {activeTab === 'STATS' && (
               <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
                 <window.StatsPage metricsData={null} />
+              </div>
+            )}
+
+            {activeTab === 'TRAINING' && (
+              <div style={{ flex: 1, minHeight: 0 }}>
+                <window.TrainingMonitor />
               </div>
             )}
           </div>
@@ -197,7 +248,6 @@
     );
   }
 
-  // Mount
   const root = ReactDOM.createRoot(document.getElementById('root'));
   root.render(React.createElement(App));
 })();

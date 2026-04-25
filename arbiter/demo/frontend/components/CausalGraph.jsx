@@ -1,7 +1,59 @@
 // CausalGraph.jsx — Dark panel with SVG-based causal graph, force-directed layout, node state animations
 
+// ── Loan domain static fallback graph (mirrors graph.py on GitHub) ────────────
+// Shown immediately; replaced by live backend data once session is ready.
+const LOAN_GRAPH_NODES = [
+  // Explicit features
+  { id: 'credit_score',      name: 'Credit Score',           node_type: 'input',  proxy: false, hidden: false },
+  { id: 'employment_status', name: 'Employment Status',      node_type: 'input',  proxy: false, hidden: false },
+  { id: 'debt_ratio',        name: 'Debt-to-Income Ratio',   node_type: 'input',  proxy: false, hidden: false },
+  { id: 'income',            name: 'Annual Income',          node_type: 'input',  proxy: false, hidden: false },
+  { id: 'loan_amount',       name: 'Loan Amount Requested',  node_type: 'input',  proxy: false, hidden: false },
+  { id: 'payment_history',   name: 'Payment History Score',  node_type: 'input',  proxy: false, hidden: false },
+  // Proxy features (visible to auditor)
+  { id: 'zip_code_cluster',       name: 'ZIP Code Cluster',                node_type: 'proxy',  proxy: true, hidden: false, protected: true },
+  { id: 'surname_pattern',        name: 'Surname Pattern Group',           node_type: 'proxy',  proxy: true, hidden: false, protected: true },
+  { id: 'neighborhood_density',   name: 'Neighborhood Commercial Density', node_type: 'proxy',  proxy: true, hidden: false, protected: true },
+  // Hidden features (latent — shown dimmed)
+  { id: 'internal_risk_score', name: 'Internal Risk Score',     node_type: 'hidden', proxy: false, hidden: true },
+  { id: 'behavioral_score',    name: 'Behavioral Pattern Score', node_type: 'hidden', proxy: false, hidden: true },
+  // Policy
+  { id: 'policy_main', name: 'Main Decision Policy', node_type: 'policy' },
+  // Outcomes
+  { id: 'denial_rate_overall',    name: 'Overall Denial Rate',              node_type: 'outcome' },
+  { id: 'approval_rate_overall',  name: 'Overall Approval Rate',            node_type: 'outcome' },
+  { id: 'denial_rate_minority',   name: 'Denial Rate – Minority',           node_type: 'outcome' },
+  { id: 'denial_rate_zip7',       name: 'Denial Rate – ZIP 7',              node_type: 'outcome' },
+];
+
+const LOAN_GRAPH_EDGES = [
+  // Policy edges (stated)
+  { source: 'credit_score',      target: 'policy_main',         edge_type: 'policy' },
+  { source: 'employment_status', target: 'policy_main',         edge_type: 'policy' },
+  { source: 'debt_ratio',        target: 'policy_main',         edge_type: 'policy' },
+  { source: 'credit_score',      target: 'denial_rate_overall', edge_type: 'policy' },
+  { source: 'employment_status', target: 'denial_rate_overall', edge_type: 'policy' },
+  { source: 'debt_ratio',        target: 'denial_rate_overall', edge_type: 'policy' },
+  // Benign causal
+  { source: 'credit_score',      target: 'approval_rate_overall', edge_type: 'causal' },
+  { source: 'debt_ratio',        target: 'denial_rate_overall',   edge_type: 'causal' },
+  { source: 'employment_status', target: 'approval_rate_overall', edge_type: 'causal' },
+  // Anomaly chain (Type 1: proxy discrimination — shown to auditor via judge view)
+  { source: 'zip_code_cluster',  target: 'internal_risk_score',  edge_type: 'causal', anomalous: true },
+  { source: 'internal_risk_score', target: 'denial_rate_overall', edge_type: 'causal', anomalous: true },
+  { source: 'internal_risk_score', target: 'denial_rate_minority', edge_type: 'causal', anomalous: true },
+  // Proxy → outcome (Type 2 fingerprint)
+  { source: 'zip_code_cluster',  target: 'denial_rate_minority', edge_type: 'causal' },
+  { source: 'zip_code_cluster',  target: 'denial_rate_zip7',     edge_type: 'causal' },
+];
+
 window.CausalGraph = function CausalGraph({ nodes, edges, nodeStates, anomalyNodes, anomalyEdges, judgeView, onJudgeToggle }) {
   const { useState, useRef, useCallback, useEffect, useMemo } = React;
+
+  // Use backend data if available, otherwise show the loan domain static graph
+  const effectiveNodes = (nodes && nodes.length > 0) ? nodes : LOAN_GRAPH_NODES;
+  const effectiveEdges = (nodes && nodes.length > 0) ? edges : LOAN_GRAPH_EDGES;
+  const isLive = nodes && nodes.length > 0;
 
   const containerRef = useRef(null);
   const svgRef = useRef(null);
@@ -13,14 +65,14 @@ window.CausalGraph = function CausalGraph({ nodes, edges, nodeStates, anomalyNod
 
   // Force-directed simulation (simplified physics)
   useEffect(() => {
-    if (!nodes || nodes.length === 0) { setSimPositions({}); return; }
+    if (!effectiveNodes || effectiveNodes.length === 0) { setSimPositions({}); return; }
     const W = 800, H = 500;
     const cx = W / 2, cy = H / 2;
 
     // Initialize all nodes at center with slight random offset
     let positions = {};
-    nodes.forEach((n, i) => {
-      const angle = (i / nodes.length) * Math.PI * 2;
+    effectiveNodes.forEach((n, i) => {
+      const angle = (i / effectiveNodes.length) * Math.PI * 2;
       positions[n.id] = {
         x: cx + (Math.random() - 0.5) * 30,
         y: cy + (Math.random() - 0.5) * 30,
@@ -34,12 +86,12 @@ window.CausalGraph = function CausalGraph({ nodes, edges, nodeStates, anomalyNod
     const layerOrder = ['input', 'proxy', 'hidden', 'decision', 'policy', 'outcome'];
     const xStep = W / (layerOrder.length + 1);
     const layerCounts = {};
-    nodes.forEach(n => {
+    effectiveNodes.forEach(n => {
       const l = _getLayer(n);
       layerCounts[l] = (layerCounts[l] || 0) + 1;
     });
     const layerIdx = {};
-    nodes.forEach(n => {
+    effectiveNodes.forEach(n => {
       const l = _getLayer(n);
       if (!layerIdx[l]) layerIdx[l] = 0;
       const li = layerOrder.indexOf(l);
@@ -100,7 +152,7 @@ window.CausalGraph = function CausalGraph({ nodes, edges, nodeStates, anomalyNod
     // Start animation
     animFrameRef.current = requestAnimationFrame(tick);
     return () => { if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current); };
-  }, [nodes]);
+  }, [effectiveNodes]);
 
   function _getLayer(node) {
     const t = (node.node_type || node.type || 'input').toLowerCase();
@@ -220,8 +272,8 @@ window.CausalGraph = function CausalGraph({ nodes, edges, nodeStates, anomalyNod
   };
 
   const renderEdge = (edge, idx) => {
-    const srcNode = nodes.find(n => n.id === edge.source);
-    const tgtNode = nodes.find(n => n.id === edge.target);
+    const srcNode = effectiveNodes.find(n => n.id === edge.source);
+    const tgtNode = effectiveNodes.find(n => n.id === edge.target);
     if (!srcNode || !tgtNode) return null;
     const style = getEdgeStyle(edge);
     const s = getPos(srcNode), t = getPos(tgtNode);
@@ -251,7 +303,7 @@ window.CausalGraph = function CausalGraph({ nodes, edges, nodeStates, anomalyNod
     );
   };
 
-  const hasGraph = nodes && nodes.length > 0;
+  const hasGraph = effectiveNodes && effectiveNodes.length > 0;
 
   return (
     <div className="dark-panel" style={{ display: 'flex', flexDirection: 'column', height: '100%', position: 'relative' }}>
@@ -260,8 +312,11 @@ window.CausalGraph = function CausalGraph({ nodes, edges, nodeStates, anomalyNod
         <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
           <span className="dark-panel-label">CAUSAL GRAPH</span>
           <span style={{ fontFamily: 'var(--font-mono)', fontSize: '10px', color: 'var(--text-muted-dark)' }}>
-            {nodes.length} NODES · {edges.length} EDGES
+            {effectiveNodes.length} NODES · {effectiveEdges.length} EDGES
           </span>
+          {!isLive && (
+            <span style={{ fontFamily: 'var(--font-mono)', fontSize: '9px', color: 'var(--amber)', background: 'rgba(245,158,11,0.1)', padding: '2px 8px', borderRadius: 999, border: '1px solid rgba(245,158,11,0.3)' }}>LOAN DOMAIN · STATIC</span>
+          )}
         </div>
         <button className={`judge-toggle ${judgeView ? 'on' : 'off'}`} onClick={onJudgeToggle} id="btn-judge-view">
           JUDGE VIEW: {judgeView ? 'ON' : 'OFF'}
@@ -278,14 +333,14 @@ window.CausalGraph = function CausalGraph({ nodes, edges, nodeStates, anomalyNod
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', gap: '16px' }}>
             <div style={{ width: 48, height: 48, borderRadius: '50%', border: '2px solid var(--border-dark)', borderTop: '2px solid var(--cyan)', animation: 'spin 1s linear infinite' }} />
             <span style={{ fontFamily: 'var(--font-body)', fontSize: '13px', color: 'var(--text-muted-dark)', fontWeight: 400 }}>
-              No episode loaded — press Reset to start
+              Loading graph...
             </span>
           </div>
         ) : (
           <svg ref={svgRef} style={{ width: '100%', height: '100%' }} onWheel={onWheel}>
             <g transform={`translate(${transform.x},${transform.y}) scale(${transform.scale})`}>
-              {edges.map((e, i) => renderEdge(e, i))}
-              {nodes.map((n, i) => renderNode(n, i))}
+              {effectiveEdges.map((e, i) => renderEdge(e, i))}
+              {effectiveNodes.map((n, i) => renderNode(n, i))}
             </g>
           </svg>
         )}

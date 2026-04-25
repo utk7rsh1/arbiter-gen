@@ -92,7 +92,7 @@ def build_schema_versions(
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def get_drift_step(total_steps: int = 20, seed: Optional[int] = None) -> int:
+def get_drift_step(seed: Optional[int] = None) -> int:
     """Return the step at which schema drift fires (between step 6 and 14)."""
     rng = random.Random(seed)
     return rng.randint(6, 14)
@@ -205,7 +205,6 @@ def schema_drift_observation(
             newly_non_compliant = list(_LOAN_CHANGED_FEATURES)
 
         return {
-            "schema_change_alert": True,
             "regulation":          regulation,
             "newly_non_compliant": newly_non_compliant,
             "effective_immediately": True,
