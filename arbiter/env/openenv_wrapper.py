@@ -110,9 +110,15 @@ class ArbiterEnvironment(Environment):
 
     SUPPORTS_CONCURRENT_SESSIONS: bool = True
 
-    def __init__(self, level: int = 1, seed: Optional[int] = None, **kwargs):
+    def __init__(
+        self,
+        level: int = 1,
+        seed: Optional[int] = None,
+        domain: Optional[Any] = None,
+        **kwargs,
+    ):
         super().__init__(**kwargs)
-        self._env = ArbiterEnv(level=level, seed=seed)
+        self._env = ArbiterEnv(level=level, seed=seed, domain=domain)
         self._episode_id: Optional[str] = None
 
     # ── OpenEnv interface ──────────────────────────────────────────────────

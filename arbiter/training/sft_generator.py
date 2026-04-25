@@ -27,8 +27,8 @@ from typing import List, Dict
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from arbiter.env.environment import ArbiterEnv
 
-
-SYSTEM_PROMPT = """You are an expert AI auditor investigating a synthetic AI Decision System for hidden anomalies.
+# Keep the original loan-domain system prompt for backwards compatibility
+_LOAN_SYSTEM_PROMPT = """You are an expert AI auditor investigating a synthetic AI Decision System for hidden anomalies.
 Your goal: run a structured investigation across at most 20 steps, then submit SUBMIT_REPORT.
 
 ━━━ OUTPUT RULE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -72,6 +72,70 @@ Step 4: {"type": "FLAG_HYPOTHESIS", "hypothesis_type": "proxy_discrimination", "
 Step 5: {"type": "CLAIM_CAUSAL", "claim": {"cause_feature": "zip_code", "effect_outcome": "denied", "mechanism": "zip_code acts as demographic proxy driving denials", "direction": "positive", "confidence": "HIGH", "basis_records": ["rec_0041", "rec_0087"], "anomaly_type": "proxy_discrimination"}}
 Step 6: {"type": "CLAIM_COUNTERFACTUAL", "claim": {"subject_record": "rec_0041", "counterfactual_feature": "zip_code", "predicted_outcome_change": "approved", "confidence": "HIGH", "basis": "Changing zip_code from cluster_1 to cluster_5 flips outcome to approved per step 3"}}
 Step 7: {"type": "SUBMIT_REPORT", "anomaly_type": "proxy_discrimination", "primary_evidence_chain": ["zip_code", "internal_risk_score", "outcome"], "affected_demographic": "residents of zip cluster_1", "recommended_action": "retrain"}"""
+
+# Alias so nothing in this file breaks when referencing SYSTEM_PROMPT directly
+SYSTEM_PROMPT = _LOAN_SYSTEM_PROMPT
+
+
+def build_system_prompt(domain=None) -> str:
+    """Build a system prompt tailored to the given domain.
+
+    Args:
+        domain: A DomainConfig instance (from groq_generator), or None to use
+                the original hardcoded loan-domain prompt.
+
+    Returns:
+        A string system prompt ready to pass to the LLM provider.
+    """
+    if domain is None:
+        return _LOAN_SYSTEM_PROMPT
+
+    explicit_names = [f.name for f in domain.explicit_features]
+    proxy_names    = [(f.name, f.protected_attribute) for f in domain.proxy_features]
+    pos = domain.positive_outcome
+    neg = domain.negative_outcome
+
+    # Action schema lines use {{ }} to escape literal braces inside the f-string
+    actions_block = (
+        '{{"type": "QUERY_FEATURE_DISTRIBUTION", "feature_id": "<name from FEATURES LIST>", "group_by": "<another feature or null>"}}\n'
+        '{{"type": "QUERY_RECORDS", "feature_filter": {{"<feature_name>": <value>}}, "outcome_filter": "{pos}|{neg}", "time_range": [0, 100]}}\n'
+        '{{"type": "QUERY_COUNTERFACTUAL", "record_id": "<rec_XXXX>", "feature_id": "<name>", "counterfactual_value": <value>}}\n'
+        '{{"type": "FLAG_HYPOTHESIS", "hypothesis_type": "proxy_discrimination|adversarial_injection|model_drift", "status": "ACTIVE|WEAKENED|ELIMINATED"}}\n'
+        '{{"type": "CLAIM_CAUSAL", "claim": {{"cause_feature": "<feature>", "effect_outcome": "{pos}|{neg}", "mechanism": "<explanation>", "direction": "positive|negative", "confidence": "HIGH|MEDIUM|LOW", "basis_records": ["rec_XXXX"], "anomaly_type": "proxy_discrimination|adversarial_injection|model_drift"}}}}\n'
+        '{{"type": "CLAIM_COUNTERFACTUAL", "claim": {{"subject_record": "rec_XXXX", "counterfactual_feature": "<feature>", "predicted_outcome_change": "{pos}|{neg}|no_change", "confidence": "HIGH|MEDIUM|LOW", "basis": "<one sentence>"}}}}\n'
+        '{{"type": "SUBMIT_REPORT", "anomaly_type": "proxy_discrimination|adversarial_injection|model_drift", "primary_evidence_chain": ["feature_a", "feature_b", "outcome"], "affected_demographic": "<description>", "recommended_action": "retrain|audit|halt"}}\n'
+    ).format(pos=pos, neg=neg)
+
+    return (
+        f"You are an expert AI auditor investigating a {domain.domain_name} AI system "
+        f"for hidden bias. The system decides whether applicants are "
+        f"{pos} or {neg}.\n"
+        f"{domain.system_description}\n\n"
+        "━━━ OUTPUT RULE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "Output EXACTLY one JSON object per turn. No prose, no markdown, no code fences.\n"
+        'The JSON must have "type" as its first key, chosen from the 7 types below.\n\n'
+        "━━━ VALID ACTIONS (copy schema exactly, fill real values) ━━━━━━━━━━━━━━━━━━━━━\n"
+        + actions_block
+        + "\n━━━ DOMAIN CONTEXT ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"Visible features: {explicit_names}\n"
+        f"Proxy features (suspicious): {[p[0] for p in proxy_names]}\n"
+        f"  (correlates: {proxy_names})\n\n"
+        "━━━ HARD CONSTRAINTS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "1. feature_id MUST be an exact name from the FEATURES LIST shown in the state.\n"
+        "2. record_id MUST be a rec_XXXX from the AVAILABLE RECORDS list.\n"
+        "3. CLAIM_CAUSAL basis_records MUST contain at least one real rec_XXXX.\n"
+        "4. Every episode MUST end with SUBMIT_REPORT.\n\n"
+        "━━━ INVESTIGATION ARC ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "Step 0-1 → QUERY_FEATURE_DISTRIBUTION on two proxy features.\n"
+        "Step 2   → QUERY_RECORDS to retrieve real rec_XXXX IDs.\n"
+        "Step 3   → QUERY_COUNTERFACTUAL on a rec_XXXX.\n"
+        "Step 4   → FLAG_HYPOTHESIS for the anomaly type you suspect.\n"
+        "Step 5   → CLAIM_CAUSAL with basis_records populated.\n"
+        "Step 6   → CLAIM_COUNTERFACTUAL on a specific record.\n"
+        "Step 7+  → SUBMIT_REPORT with your verdict.\n\n"
+        "Output exactly one JSON action per turn. Think step by step before acting."
+    )
+
 
 USER_PROMPT_TEMPLATE = """INVESTIGATION STATE — Step {step}/20
 Budget remaining : {budget}
@@ -279,6 +343,7 @@ def generate_trajectory(
     level: int = 1,
     stateless: bool = False,
     max_steps: int = 20,
+    system_prompt: str = None,
 ) -> List[Dict]:
     """Run one episode with the LLM as the Auditor.
 
@@ -288,6 +353,8 @@ def generate_trajectory(
                      but ~10x more tokens per trajectory).
     """
     import re as _re
+
+    active_prompt = system_prompt if system_prompt is not None else SYSTEM_PROMPT
 
     obs = env.reset()
     pairs: List[Dict] = []
@@ -317,7 +384,7 @@ def generate_trajectory(
             messages.append({"role": "user", "content": user_msg})
             call_messages = messages
 
-        assistant_text = client.chat(call_messages, system=SYSTEM_PROMPT)
+        assistant_text = client.chat(call_messages, system=active_prompt)
 
         if not stateless:
             messages.append({"role": "assistant", "content": assistant_text})
@@ -384,6 +451,13 @@ def main():
                         help="Ollama model name (default: llama3.2). Run 'ollama pull <model>' first.")
     parser.add_argument("--ollama-url",    default="http://localhost:11434",
                         help="Ollama base URL (default: http://localhost:11434)")
+    parser.add_argument("--domain",    default=None,
+                        help="Plain-English domain description for Groq-generated config "
+                             "(e.g. 'A hiring AI that screens software engineering resumes'). "
+                             "Omit to use the default loan domain.")
+    parser.add_argument("--groq-api-key", default=None,
+                        help="Groq API key for domain generation (overrides GROQ_API_KEY env var). "
+                             "Only needed when --domain is set.")
     args = parser.parse_args()
 
     # ── Build client ──────────────────────────────────────────────────────────
@@ -415,6 +489,22 @@ def main():
         client = _AnthropicClient(api_key=api_key)
         print("Using Anthropic (claude-opus-4-5)")
 
+    # ── Domain config (optional) ──────────────────────────────────────────────
+    domain = None
+    active_system_prompt = _LOAN_SYSTEM_PROMPT
+    if args.domain:
+        from arbiter.env.groq_generator import GroqGraphGenerator
+        groq_key = args.groq_api_key or os.environ.get("GROQ_API_KEY")
+        if not groq_key:
+            print("--domain requires a Groq API key. Set GROQ_API_KEY or pass --groq-api-key")
+            sys.exit(1)
+        print(f"Generating domain config for: {args.domain!r}")
+        gen    = GroqGraphGenerator(api_key=groq_key)
+        domain = gen.generate_cached(args.domain)
+        active_system_prompt = build_system_prompt(domain)
+        print(f"Domain: {domain.domain_name}  |  "
+              f"{domain.positive_outcome}/{domain.negative_outcome}")
+
     # ── Info banner ───────────────────────────────────────────────────────────
     mode_str = "STATELESS (no history)" if args.stateless else "stateful (full history)"
     print(f"Mode      : {mode_str}")
@@ -433,7 +523,7 @@ def main():
     with open(args.output, "w") as f:
         for i in range(args.n):
             level = levels[i % len(levels)]
-            env   = ArbiterEnv(level=level, seed=i)
+            env   = ArbiterEnv(level=level, seed=i, domain=domain)
 
             print(f"[{i+1}/{args.n}] Level {level} trajectory...", end=" ", flush=True)
             try:
@@ -441,6 +531,7 @@ def main():
                     env, client, level=level,
                     stateless=args.stateless,
                     max_steps=args.max_steps,
+                    system_prompt=active_system_prompt,
                 )
                 for pair in pairs:
                     f.write(json.dumps(pair) + "\n")

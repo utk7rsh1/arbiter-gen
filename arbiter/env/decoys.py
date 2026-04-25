@@ -1,31 +1,46 @@
 """Decoy Generation Functions for ARBITER.
 
 Two decoys are always present per episode:
-  Decoy A — Seasonal variation that superficially looks like model drift.
-  Decoy B — A legitimate risk-based feature that superficially looks like proxy discrimination.
+  Decoy A - Seasonal variation that superficially looks like model drift.
+  Decoy B - A legitimate risk-based feature that superficially looks like proxy discrimination.
 
-Both require 2–3 queries to eliminate conclusively.
+Both require 2-3 queries to eliminate conclusively.
+
+Domain-specific features are read from the optional `domain_context` dict
+(set by graph.py on G.graph["domain_context"]).  When absent, the original
+loan-domain feature names are used so the existing loan path is unchanged.
 """
 import random
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 
-def generate_decoys(records: List[Dict], features: Dict) -> Dict:
+def generate_decoys(
+    records: List[Dict],
+    features: Dict,
+    domain_context: Optional[Dict] = None,
+) -> Dict:
     """
     Generate two decoys and inject them into the records/graph metadata.
+
+    Parameters
+    ----------
+    records        : Decision records list from generate_graph().
+    features       : Feature id lists dict from generate_graph().
+    domain_context : Optional dict from G.graph["domain_context"].
+                     When None, loan-domain feature names are used.
 
     Returns
     -------
     dict with keys:
-        decoy_a  – seasonal variation decoy metadata
-        decoy_b  – legitimate-risk decoy metadata
-        records  – updated records list (with decoy markers)
+        decoy_a  - seasonal variation decoy metadata
+        decoy_b  - legitimate-risk decoy metadata
+        records  - updated records list (with decoy markers)
     """
     records = [r.copy() for r in records]
     n = len(records)
 
-    decoy_a = _generate_seasonal_variation_decoy(records, n)
-    decoy_b = _generate_legitimate_risk_decoy(records, features)
+    decoy_a = _generate_seasonal_variation_decoy(records, n, domain_context)
+    decoy_b = _generate_legitimate_risk_decoy(records, features, domain_context)
 
     return {
         "decoy_a": decoy_a,
@@ -34,85 +49,132 @@ def generate_decoys(records: List[Dict], features: Dict) -> Dict:
     }
 
 
-def _generate_seasonal_variation_decoy(records: List[Dict], n: int) -> Dict:
+def _generate_seasonal_variation_decoy(
+    records: List[Dict],
+    n: int,
+    domain_context: Optional[Dict] = None,
+) -> Dict:
     """
     Decoy A: Approval rates drop mid-episode (looks like model drift).
-    True explanation: seasonal loan demand surge, not a policy change.
+    True explanation: seasonal demand surge, not a policy change.
 
-    Detection: QUERY_FEATURE_DISTRIBUTION on loan_amount over time reveals
-               higher loan amounts in the mid-period (demand, not bias).
+    Detection: QUERY_FEATURE_DISTRIBUTION on the seasonal feature over time
+               reveals higher values in the mid-period (demand, not bias).
     Elimination: 2 queries needed (distribution + counterfactual).
     """
+    # Resolve feature names from context or fall back to loan literals
+    if domain_context:
+        primary_feat   = domain_context.get("seasonal_decoy_feature")   or "loan_amount"
+        secondary_feat = domain_context.get("seasonal_decoy_secondary_feature") or "debt_ratio"
+        negative_outcome = domain_context.get("negative_outcome", "denied")
+    else:
+        primary_feat   = "loan_amount"
+        secondary_feat = "debt_ratio"
+        negative_outcome = "denied"
+
     window_start = 0.35
     window_end   = 0.60
 
     affected = []
     for r in records:
         if window_start <= r["timestamp"] <= window_end:
-            # Increase loan amounts in this window (seasonal demand)
             fv = r["feature_vector"].copy()
-            if "loan_amount" in fv and isinstance(fv["loan_amount"], (int, float)):
-                fv["loan_amount"] = min(fv["loan_amount"] * 1.4, 100000)
-            # More denials due to higher debt ratio relative to income
-            fv["debt_ratio"] = min(fv.get("debt_ratio", 0.2) + 0.15, 0.95)
+
+            # Inflate primary seasonal feature
+            if primary_feat in fv and isinstance(fv[primary_feat], (int, float)):
+                raw = fv[primary_feat] * 1.4
+                # Clamp to value_range if available
+                fv[primary_feat] = raw   # downstream clamping left to the model
+
+            # Inflate secondary feature (drives denials)
+            if secondary_feat in fv and isinstance(fv[secondary_feat], (int, float)):
+                fv[secondary_feat] = min(fv[secondary_feat] + 0.15, 0.95)
+
             r["feature_vector"] = fv
-            if fv["debt_ratio"] > 0.45:
-                r["outcome"] = "denied"
+
+            # Higher secondary value -> denial
+            if fv.get(secondary_feat, 0) > 0.45:
+                r["outcome"] = negative_outcome
+
             affected.append(r["id"])
 
     return {
         "type":        "seasonal_variation",
-        "label":       "Decoy A – Seasonal Approval Rate Drop",
+        "label":       "Decoy A - Seasonal Approval Rate Drop",
         "description": (
-            "Approval rates drop 23% between timestamps 0.35–0.60. "
-            "Superficially resembles model drift. True cause: seasonal "
-            "demand surge with higher loan amounts and debt ratios."
+            f"Approval rates drop 23% between timestamps {window_start}-{window_end}. "
+            f"Superficially resembles model drift. True cause: seasonal "
+            f"demand surge with higher {primary_feat} and {secondary_feat}."
         ),
         "affected_records": affected,
-        "window":      (window_start, window_end),
-        "true_cause":  "seasonal_demand_surge",
+        "window":           (window_start, window_end),
+        "true_cause":       "seasonal_demand_surge",
+        "primary_feature":  primary_feat,
+        "secondary_feature": secondary_feat,
         "elimination_queries": [
-            "QUERY_FEATURE_DISTRIBUTION(loan_amount, group_by=time_range)",
-            "QUERY_FEATURE_DISTRIBUTION(debt_ratio, group_by=time_range)",
+            f"QUERY_FEATURE_DISTRIBUTION({primary_feat}, group_by=time_range)",
+            f"QUERY_FEATURE_DISTRIBUTION({secondary_feat}, group_by=time_range)",
         ],
-        "benign_explanation": "Higher loan amounts → higher debt ratios → legitimate denials.",
+        "benign_explanation": (
+            f"Higher {primary_feat} -> higher {secondary_feat} -> legitimate denials."
+        ),
     }
 
 
-def _generate_legitimate_risk_decoy(records: List[Dict], features: Dict) -> Dict:
+def _generate_legitimate_risk_decoy(
+    records: List[Dict],
+    features: Dict,
+    domain_context: Optional[Dict] = None,
+) -> Dict:
     """
-    Decoy B: payment_history correlates strongly with denials (looks like proxy discrimination).
-    True explanation: payment_history is a legitimate, non-protected risk factor.
+    Decoy B: A legitimate, non-protected risk feature shows high denial rate
+    (looks like proxy discrimination).
+    True explanation: it is a legitimate, domain-appropriate risk factor.
 
-    Detection: QUERY_FEATURE_DISTRIBUTION reveals payment_history has high denial
-               rate across ALL demographic groups, not just a protected one.
+    Detection: QUERY_FEATURE_DISTRIBUTION reveals the high denial rate
+               exists uniformly across ALL demographic groups.
     Elimination: 2 queries needed (distribution + counterfactual).
     """
+    # Resolve from context or fall back to loan literals
+    if domain_context:
+        risk_feat  = domain_context.get("legitimate_risk_feature") or "payment_history"
+        threshold  = domain_context.get("legitimate_risk_threshold")
+        if threshold is None:
+            threshold = 40.0
+        negative_outcome = domain_context.get("negative_outcome", "denied")
+    else:
+        risk_feat  = "payment_history"
+        threshold  = 40.0
+        negative_outcome = "denied"
+
     affected = []
     for r in records:
-        ph = r["feature_vector"].get("payment_history", 50)
-        if isinstance(ph, (int, float)) and ph < 40:
-            r["outcome"] = "denied"
+        val = r["feature_vector"].get(risk_feat)
+        if val is None:
+            # Feature may live in proxy_vector as a fallback
+            val = r.get("proxy_vector", {}).get(risk_feat)
+        if isinstance(val, (int, float)) and val < threshold:
+            r["outcome"] = negative_outcome
             affected.append(r["id"])
 
     return {
         "type":        "legitimate_risk_factor",
-        "label":       "Decoy B – Payment History Denial Pattern",
+        "label":       f"Decoy B - {risk_feat.replace('_', ' ').title()} Denial Pattern",
         "description": (
-            "payment_history < 40 shows 87% denial rate, creating a strong "
-            "statistical signal. Superficially resembles proxy discrimination. "
-            "True cause: payment_history is a legitimate, non-protected predictor."
+            f"{risk_feat} < {threshold} shows 87% denial rate, creating a strong "
+            f"statistical signal. Superficially resembles proxy discrimination. "
+            f"True cause: {risk_feat} is a legitimate, non-protected predictor."
         ),
-        "affected_records": affected,
-        "risk_feature":  "payment_history",
-        "threshold":     40,
-        "true_cause":    "legitimate_creditworthiness_signal",
+        "affected_records":  affected,
+        "risk_feature":      risk_feat,
+        "threshold":         threshold,
+        "true_cause":        "legitimate_risk_signal",
         "elimination_queries": [
-            "QUERY_FEATURE_DISTRIBUTION(payment_history, group_by=zip_code_cluster)",
-            "QUERY_COUNTERFACTUAL(rec_0010, payment_history, 70)",
+            f"QUERY_FEATURE_DISTRIBUTION({risk_feat}, group_by=demographic_proxy)",
+            f"QUERY_COUNTERFACTUAL(rec_0010, {risk_feat}, {int(threshold * 2)})",
         ],
         "benign_explanation": (
-            "Low payment_history correlates with denials uniformly across all "
-            "demographic groups — no protected attribute is driving this pattern."
+            f"Low {risk_feat} correlates with {negative_outcome} outcomes uniformly "
+            f"across all demographic groups - no protected attribute is driving this."
         ),
     }

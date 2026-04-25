@@ -119,5 +119,34 @@ Ablation: terminal-reward-only (50 eps) → proves 15x sample efficiency
 
 ```
 python validate.py
-→ 70/70 checks passed (100%)
+-> 70/70 checks passed (100%)
 ```
+
+## Running Tests
+
+ARBITER's test suite is split into two tiers:
+
+| Tier | Marker | Requirement | Command |
+|---|---|---|---|
+| Offline | *(none)* | No API key needed | `pytest -m "not groq" -v` |
+| Groq-gated | `@pytest.mark.groq` | `GROQ_API_KEY` env var | `pytest -v` |
+
+```bash
+# Install test dependencies
+pip install pytest>=7.0
+
+# Offline suite (no API key required) — covers Phases 3-7 generalization
+pytest -m "not groq" -v
+
+# Full suite (requires GROQ_API_KEY)
+export GROQ_API_KEY=your_key_here
+pytest -v
+```
+
+The offline suite covers:
+- `tests/test_generalization.py` — Phases 3-7 regressions using a hand-built hiring-AI domain (no Groq call)
+- `tests/test_groq_graph.py::test_loan_domain_backwards_compat` — loan domain end-to-end
+
+The Groq-gated suite additionally covers:
+- Full Groq API output validation for multiple domain descriptions
+- Multi-domain parametrised episode runs

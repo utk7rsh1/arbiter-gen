@@ -39,10 +39,16 @@ from config import QUERY_BUDGET
 class ArbiterEnv:
     """Single-session ARBITER environment."""
 
-    def __init__(self, level: int = 1, seed: Optional[int] = None):
-        self.curriculum  = Curriculum(start_level=level)
-        self.defender    = Defender(level=level, seed=seed)
-        self.seed        = seed
+    def __init__(
+        self,
+        level: int = 1,
+        seed: Optional[int] = None,
+        domain: Optional[Any] = None,
+    ):
+        self.curriculum    = Curriculum(start_level=level)
+        self.defender      = Defender(level=level, seed=seed)
+        self.seed          = seed
+        self.domain        = domain   # DomainConfig | None  (None → loan domain)
         self._episode_seed = seed
         self._reset_episode_state()
 
@@ -63,15 +69,26 @@ class ArbiterEnv:
         self._reset_episode_state()
         self.defender.reset_episode(level=self.curriculum.level)
 
-        # Generate graph
+        # Generate graph (pass domain through; None → loan domain)
         ep_data = generate_graph(
             seed=self._episode_seed,
             anomaly_type=None,
             num_decisions=45,
+            domain=self.domain,
         )
 
-        # Inject decoys
-        decoy_data = generate_decoys(ep_data["records"], ep_data["features"])
+        # Read domain_context stashed by generate_graph (None for loan path)
+        domain_context = ep_data["graph"].graph.get("domain_context")
+
+        # Inject decoys (pass domain_context so features are domain-appropriate)
+        all_feature_names = (
+            ep_data["features"]["explicit"]
+            + ep_data["features"]["proxy"]
+            + ep_data["features"]["hidden"]
+        )
+        decoy_data = generate_decoys(
+            ep_data["records"], ep_data["features"], domain_context=domain_context
+        )
         ep_data["records"]  = decoy_data["records"]
         ep_data["decoy_a"]  = decoy_data["decoy_a"]
         ep_data["decoy_b"]  = decoy_data["decoy_b"]
@@ -83,10 +100,17 @@ class ArbiterEnv:
         # Level 6: apply schema drift
         if self.curriculum.schema_drift_enabled:
             drift_step = get_drift_step(total_steps=20, seed=self._episode_seed)
-            ep_data = apply_schema_drift(ep_data, drift_step)
+            ep_data = apply_schema_drift(
+                ep_data,
+                drift_step,
+                domain_context=domain_context,
+                all_feature_names=all_feature_names,
+            )
             self._drift_step = drift_step
         else:
             self._drift_step = None
+
+        self._domain_context = domain_context   # stash for step() use
 
         self._ep = ep_data
         self._anomaly_info = ep_data["anomaly_info"]
@@ -199,7 +223,11 @@ class ArbiterEnv:
         # Level 6: inject schema change alert into observation at drift step
         obs = self._observation()
         if self._drift_step is not None:
-            alert = schema_drift_observation(self._step, self._drift_step)
+            alert = schema_drift_observation(
+                self._step,
+                self._drift_step,
+                domain_context=getattr(self, "_domain_context", None),
+            )
             if alert:
                 obs["schema_change_alert"] = alert
         return obs, reward, False, info
@@ -361,6 +389,7 @@ class ArbiterEnv:
         self._anomaly_info: Dict    = {}
         self._drift_step: Optional[int] = None          # Level 6
         self._schema_change_flagged: bool = False        # Level 6
+        self._domain_context: Optional[Dict] = None     # set in reset() from graph
 
     def _observation(self) -> Dict:
         if self._ep is None:
@@ -390,10 +419,14 @@ class ArbiterEnv:
 _sessions: Dict[str, ArbiterEnv] = {}
 
 
-def create_session(level: int = 1, seed: Optional[int] = None) -> str:
+def create_session(
+    level: int = 1,
+    seed: Optional[int] = None,
+    domain: Optional[Any] = None,
+) -> str:
     """Create a new UUID-keyed session. Returns session_id."""
     sid = str(uuid.uuid4())
-    _sessions[sid] = ArbiterEnv(level=level, seed=seed)
+    _sessions[sid] = ArbiterEnv(level=level, seed=seed, domain=domain)
     return sid
 
 

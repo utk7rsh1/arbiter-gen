@@ -16,6 +16,7 @@ import networkx as nx
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from arbiter.env.environment import ArbiterEnv
 from arbiter.env.dual_env   import DualArbiterEnv
+from arbiter.env.domain_config import DomainConfig
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
 ROOT     = Path(__file__).parent.parent.parent
@@ -57,6 +58,95 @@ SCRIPTED_ACTIONS = [
     },
 ]
 
+# ── Domain-aware scripted action builder ───────────────────────────────────────
+def _build_domain_actions(domain: DomainConfig) -> list:
+    """Build a generic scripted action sequence for any DomainConfig."""
+    proxy0      = domain.proxy_features[0].name
+    proxy0_val  = domain.discriminated_group_value
+    hidden0     = domain.hidden_features[0].name
+    neg         = domain.negative_outcome
+    pos         = domain.positive_outcome
+    thresh_feat = domain.approval_threshold_feature
+    denial_node = domain.denial_outcome_id()
+
+    return [
+        {"type": "QUERY_RECORDS",
+         "feature_filter": {}, "outcome_filter": neg, "time_range": None},
+        {"type": "QUERY_FEATURE_DISTRIBUTION",
+         "feature_id": proxy0, "group_by": None},
+        {"type": "CLAIM_CAUSAL", "claim": {
+            "cause_feature":   proxy0,
+            "effect_outcome":  denial_node,
+            "mechanism":       hidden0,
+            "direction":       "positive",
+            "confidence":      "HIGH",
+            "basis_records":   ["rec_0001", "rec_0007", "rec_0012"],
+            "anomaly_type":    "proxy_discrimination",
+        }},
+        {"type": "QUERY_COUNTERFACTUAL",
+         "record_id": "rec_0001", "feature_id": proxy0,
+         "counterfactual_value": proxy0_val},
+        {"type": "CLAIM_COUNTERFACTUAL", "claim": {
+            "subject_record":            "rec_0001",
+            "counterfactual_feature":    proxy0,
+            "predicted_outcome_change":  pos,
+            "confidence":                "HIGH",
+            "basis":                     "cf_query_step_3",
+        }},
+        {"type": "QUERY_FEATURE_DISTRIBUTION",
+         "feature_id": thresh_feat, "group_by": proxy0},
+        {"type": "CLAIM_CAUSAL", "claim": {
+            "cause_feature":   proxy0,
+            "effect_outcome":  hidden0,
+            "mechanism":       "proxy_laundering",
+            "direction":       "positive",
+            "confidence":      "HIGH",
+            "basis_records":   ["rec_0001", "rec_0007", "rec_0012", "rec_0019"],
+            "anomaly_type":    "proxy_discrimination",
+        }},
+        {"type": "FLAG_HYPOTHESIS",
+         "hypothesis_type": "proxy_discrimination", "status": "CONFIRMED"},
+        {"type": "FLAG_HYPOTHESIS",
+         "hypothesis_type": "model_drift", "status": "ELIMINATED"},
+        {"type": "SUBMIT_REPORT",
+         "anomaly_type":            "proxy_discrimination",
+         "primary_evidence_chain":  [proxy0, hidden0, denial_node],
+         "affected_demographic":    f"{proxy0}_{proxy0_val}",
+         "recommended_action":      "audit"},
+    ]
+
+
+def _domain_info_html(domain: DomainConfig | None) -> str:
+    """Render a compact summary card for the active domain."""
+    if domain is None:
+        return (
+            "<div style='background:#0a1628;border:1px solid #1e3a6e;border-radius:8px;"
+            "padding:10px 14px;font-size:11px;color:#64748b;'>"
+            "<strong style='color:#60a5fa;'>Domain:</strong> "
+            "Loan Approval <span style='color:#334155;'>(default hardcoded domain)</span></div>"
+        )
+    proxy_names = [f.name for f in domain.proxy_features]
+    return (
+        f"<div style='background:#0a1628;border:1px solid #1e3a6e;border-radius:8px;"
+        f"padding:10px 14px;font-size:11px;line-height:1.6;'>"
+        f"<div style='display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start;'>"
+        f"<div><span style='color:#475569;letter-spacing:0.5px;'>DOMAIN</span><br>"
+        f"<strong style='color:#60a5fa;font-size:13px;'>{domain.domain_name}</strong></div>"
+        f"<div><span style='color:#475569;letter-spacing:0.5px;'>OUTCOMES</span><br>"
+        f"<span style='color:#4ade80;'>{domain.positive_outcome}</span> "
+        f"/ <span style='color:#f87171;'>{domain.negative_outcome}</span></div>"
+        f"<div><span style='color:#475569;letter-spacing:0.5px;'>THRESHOLD</span><br>"
+        f"<span style='color:#e2e8f0;'>{domain.approval_threshold_feature} "
+        f"&gt; {domain.approval_threshold_value}</span></div>"
+        f"<div><span style='color:#475569;letter-spacing:0.5px;'>PROXY FEATURES</span><br>"
+        f"<span style='color:#fbbf24;'>{', '.join(proxy_names)}</span></div>"
+        f"<div><span style='color:#475569;letter-spacing:0.5px;'>DISCRIMINATED GROUP</span><br>"
+        f"<span style='color:#f87171;'>{domain.discriminated_group_value}</span> "
+        f"in <span style='color:#fbbf24;'>{domain.discriminated_group_feature}</span></div>"
+        f"</div></div>"
+    )
+
+
 # ── Episode global state ────────────────────────────────────────────────────────
 _env            = None
 _obs            = None
@@ -75,6 +165,8 @@ _reward_components   = {"claim": 0.0, "counterfactual": 0.0, "tom": 0.0,
 _episode_done        = False
 _verdict_correct     = None
 _current_level       = 3
+_domain_config       = None   # DomainConfig | None  (None → loan domain)
+_active_actions      = None   # will be set to SCRIPTED_ACTIONS or domain-specific list
 
 # ── Dual Auditor (Level 7) global state ────────────────────────────────────────
 _dual_env     = None
@@ -426,10 +518,11 @@ def _do_step():
     global _step_index, _claims, _hypotheses, _budget, _reward_total
     global _reward_components, _episode_done, _verdict_correct, _obs, _render
 
-    if _env is None or _episode_done or _step_index >= len(SCRIPTED_ACTIONS):
+    actions = _active_actions or SCRIPTED_ACTIONS
+    if _env is None or _episode_done or _step_index >= len(actions):
         return None, False
 
-    action = copy.deepcopy(SCRIPTED_ACTIONS[_step_index])
+    action = copy.deepcopy(actions[_step_index])
     try:
         _obs, reward, done, info = _env.step(action)
         _render = _env.render()
@@ -503,15 +596,33 @@ def _level_str() -> str:
 
 
 # ── Episode handlers ────────────────────────────────────────────────────────────
-def new_episode_fn(level_radio, seed_num):
+def new_episode_fn(level_radio, seed_num, domain_desc=""):
     global _env, _obs, _render, _step_index, _claims, _hypotheses, _budget
-    global _reward_total, _reward_components, _episode_done, _verdict_correct, _current_level
+    global _reward_total, _reward_components, _episode_done, _verdict_correct
+    global _current_level, _domain_config, _active_actions
 
     level = int(str(level_radio).replace("L", "").strip()) if level_radio else 3
     _current_level = level
-    _env   = ArbiterEnv(level=level)
-    seed   = int(seed_num) if seed_num else None
-    _obs   = _env.reset(seed=seed)
+
+    # Resolve domain config if a description was provided
+    domain_desc = (domain_desc or "").strip()
+    if domain_desc:
+        try:
+            from arbiter.env.groq_generator import GroqGraphGenerator
+            gen            = GroqGraphGenerator()
+            _domain_config = gen.generate_cached(domain_desc)
+            _active_actions = _build_domain_actions(_domain_config)
+        except Exception as exc:
+            _domain_config  = None
+            _active_actions = None
+            print(f"[ARBITER] Domain generation failed: {exc}. Falling back to loan domain.")
+    else:
+        _domain_config  = None
+        _active_actions = None
+
+    _env    = ArbiterEnv(level=level, domain=_domain_config)
+    seed    = int(seed_num) if seed_num else None
+    _obs    = _env.reset(seed=seed)
     _render = _env.render()
     _step_index    = 0
     _claims        = []
@@ -524,19 +635,25 @@ def new_episode_fn(level_radio, seed_num):
                            "chain": 0.0, "consistency": 0.0, "budget": 0.0}
     _episode_done    = False
     _verdict_correct = None
-    return _collect_outputs(_level_str(), f"Episode started at Level {level}. Seed: {seed}.", False)
+    domain_label = _domain_config.domain_name if _domain_config else "Loan Approval (default)"
+    return _collect_outputs(
+        _level_str(),
+        f"Episode started | Level {level} | Domain: {domain_label} | Seed: {seed}",
+        False,
+    )
 
 
 def step_fn():
+    actions = _active_actions or SCRIPTED_ACTIONS
     if _env is None:
         return _collect_outputs("—", "No episode — click New Episode first.", False)
     if _episode_done:
         return _collect_outputs(_level_str(), "Episode complete.", False)
-    if _step_index >= len(SCRIPTED_ACTIONS):
+    if _step_index >= len(actions):
         return _collect_outputs(_level_str(), "All scripted steps exhausted.", False)
     _do_step()
-    atype   = SCRIPTED_ACTIONS[min(_step_index - 1, len(SCRIPTED_ACTIONS) - 1)]["type"]
-    suffix  = " — EPISODE COMPLETE" if _episode_done else ""
+    atype  = actions[min(_step_index - 1, len(actions) - 1)]["type"]
+    suffix = " — EPISODE COMPLETE" if _episode_done else ""
     return _collect_outputs(_level_str(), f"Step {_step_index}: {atype}{suffix}", False)
 
 
@@ -551,12 +668,13 @@ def pause_fn():
 
 
 def auto_tick_fn():
-    if _env is None or _episode_done or _step_index >= len(SCRIPTED_ACTIONS):
+    actions = _active_actions or SCRIPTED_ACTIONS
+    if _env is None or _episode_done or _step_index >= len(actions):
         return _collect_outputs(_level_str(), "Episode complete.", False)
     _do_step()
-    atype   = SCRIPTED_ACTIONS[min(_step_index - 1, len(SCRIPTED_ACTIONS) - 1)]["type"]
-    suffix  = " — EPISODE COMPLETE" if _episode_done else ""
-    still   = not _episode_done and _step_index < len(SCRIPTED_ACTIONS)
+    atype  = actions[min(_step_index - 1, len(actions) - 1)]["type"]
+    suffix = " — EPISODE COMPLETE" if _episode_done else ""
+    still  = not _episode_done and _step_index < len(actions)
     return _collect_outputs(_level_str(), f"Auto: step {_step_index} — {atype}{suffix}", still)
 
 
@@ -808,6 +926,22 @@ def build_demo() -> gr.Blocks:
             # ── Tab 1: Investigate ─────────────────────────────────────────────
             with gr.Tab("Investigate"):
 
+                # ── Domain description row ──
+                with gr.Row():
+                    domain_input = gr.Textbox(
+                        placeholder=(
+                            "Enter a domain description to generate a new AI system, "
+                            "e.g. 'A hiring AI that screens software engineering resumes' "
+                            "— or leave blank for the default loan domain"
+                        ),
+                        label="Domain Description (powered by Groq)",
+                        scale=8,
+                        lines=1,
+                    )
+                    gen_domain_btn = gr.Button("Generate Domain", variant="secondary", scale=1)
+
+                domain_info_html = gr.HTML(_domain_info_html(None))
+
                 # ── Controls row ──
                 with gr.Row():
                     level_radio = gr.Radio(
@@ -826,7 +960,7 @@ def build_demo() -> gr.Blocks:
                     auto_btn  = gr.Button("Auto-run  ▶",  variant="secondary",  scale=2)
                     pause_btn = gr.Button("Pause  ‖",     variant="secondary",  scale=1)
 
-                status_md  = gr.Markdown("_Click **New Episode** to start. Then use **Step** or **Auto-run**._")
+                status_md  = gr.Markdown("_Enter a domain description (optional), then click **New Episode**._")
                 stats_html = gr.HTML(_bottom_stats(0, 20, 0.0, [], "L3"))
 
                 # ── Main layout ──
@@ -844,13 +978,48 @@ def build_demo() -> gr.Blocks:
 
                 _all = [graph_plot, claim_html, reward_html, hyp_html, stats_html, status_md, step_timer]
 
-                new_btn.click(fn=new_episode_fn,  inputs=[level_radio, seed_num], outputs=_all)
-                step_btn.click(fn=step_fn,                                         outputs=_all)
-                auto_btn.click(fn=auto_run_fn,                                     outputs=_all)
-                pause_btn.click(fn=pause_fn,                                        outputs=_all)
-                step_timer.tick(fn=auto_tick_fn,                                    outputs=_all)
+                def _new_episode_with_domain(level_r, seed_n, dom_desc):
+                    return new_episode_fn(level_r, seed_n, dom_desc)
 
-                demo.load(fn=lambda: new_episode_fn("L3", 42), outputs=_all)
+                def _generate_domain_fn(dom_desc):
+                    """Generate a domain config and update the info panel without starting an episode."""
+                    global _domain_config, _active_actions
+                    dom_desc = (dom_desc or "").strip()
+                    if not dom_desc:
+                        _domain_config  = None
+                        _active_actions = None
+                        return _domain_info_html(None)
+                    try:
+                        from arbiter.env.groq_generator import GroqGraphGenerator
+                        gen             = GroqGraphGenerator()
+                        _domain_config  = gen.generate_cached(dom_desc)
+                        _active_actions = _build_domain_actions(_domain_config)
+                        return _domain_info_html(_domain_config)
+                    except Exception as exc:
+                        _domain_config  = None
+                        _active_actions = None
+                        return (
+                            f"<div style='background:#1a0a0a;border:1px solid #7f1d1d;"
+                            f"border-radius:8px;padding:10px 14px;font-size:11px;color:#f87171;'>"
+                            f"Domain generation failed: {exc}<br>Falling back to loan domain.</div>"
+                        )
+
+                gen_domain_btn.click(
+                    fn=_generate_domain_fn,
+                    inputs=[domain_input],
+                    outputs=[domain_info_html],
+                )
+                new_btn.click(
+                    fn=_new_episode_with_domain,
+                    inputs=[level_radio, seed_num, domain_input],
+                    outputs=_all,
+                )
+                step_btn.click(fn=step_fn,       outputs=_all)
+                auto_btn.click(fn=auto_run_fn,   outputs=_all)
+                pause_btn.click(fn=pause_fn,     outputs=_all)
+                step_timer.tick(fn=auto_tick_fn, outputs=_all)
+
+                demo.load(fn=lambda: new_episode_fn("L3", 42, ""), outputs=_all)
 
             # ── Tab 2: Training Monitor ────────────────────────────────────────
             with gr.Tab("Training Monitor"):
@@ -1026,8 +1195,9 @@ def build_demo() -> gr.Blocks:
                     if _dual_env is None or _dual_done:
                         return None
                     # Pick action from scripted list (cycle through)
-                    idx    = _dual_step % len(SCRIPTED_ACTIONS)
-                    action = copy.deepcopy(SCRIPTED_ACTIONS[idx])
+                    actions = _active_actions or SCRIPTED_ACTIONS
+                    idx    = _dual_step % len(actions)
+                    action = copy.deepcopy(actions[idx])
                     obs_raw, reward, done, info = _dual_env.step(auditor_id, action)
                     if auditor_id == "A":
                         _dual_obs_a   = obs_raw
