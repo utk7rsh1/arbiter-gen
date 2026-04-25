@@ -20,16 +20,18 @@ Action format (dict):
 import uuid
 from typing import Any, Dict, List, Optional
 
-from .graph         import generate_graph
-from .decoys        import generate_decoys
+from .graph          import generate_graph
+from .decoys         import generate_decoys
 from .counterfactual import intervene
-from .claims        import (CausalLinkClaim, CounterfactualClaim, TheoryOfMindClaim,
-                             verify_causal_claim, verify_counterfactual_claim,
-                             verify_theory_of_mind_claim)
-from .reward        import intermediate_claim_reward, compute_episode_reward
-from .meta_overseer import check_consistency
-from .defender      import Defender
-from .curriculum    import Curriculum
+from .claims         import (CausalLinkClaim, CounterfactualClaim, TheoryOfMindClaim,
+                              verify_causal_claim, verify_counterfactual_claim,
+                              verify_theory_of_mind_claim)
+from .reward         import intermediate_claim_reward, compute_episode_reward
+from .meta_overseer  import check_consistency
+from .defender       import Defender
+from .curriculum     import Curriculum
+from .schema_drift   import (apply_schema_drift, get_drift_step, schema_drift_observation,
+                              verify_schema_change_flag, SCHEMA_MISSED_PENALTY)
 
 from config import QUERY_BUDGET
 
@@ -78,6 +80,14 @@ class ArbiterEnv:
         if self.curriculum.defender_active:
             ep_data = self.defender.obfuscate(ep_data, self._hypothesis_flags)
 
+        # Level 6: apply schema drift
+        if self.curriculum.schema_drift_enabled:
+            drift_step = get_drift_step(total_steps=20, seed=self._episode_seed)
+            ep_data = apply_schema_drift(ep_data, drift_step)
+            self._drift_step = drift_step
+        else:
+            self._drift_step = None
+
         self._ep = ep_data
         self._anomaly_info = ep_data["anomaly_info"]
 
@@ -121,6 +131,21 @@ class ArbiterEnv:
 
         elif atype == "FLAG_HYPOTHESIS":
             self._handle_flag_hypothesis(action)
+
+        elif atype == "FLAG_SCHEMA_CHANGE":
+            if not self.curriculum.schema_drift_enabled:
+                info["error"] = "FLAG_SCHEMA_CHANGE only available at Level 6+"
+            else:
+                result = verify_schema_change_flag(
+                    claim_feature=action.get("feature_id", ""),
+                    claim_step=self._step,
+                    drift_step=self._drift_step or 99,
+                    changed_features=self._ep.get("schema_drift", {}).get("changed_features", []),
+                )
+                reward = result["reward"]
+                self._schema_change_flagged = True
+                self._claim_rewards.append(reward)
+                info["schema_verification"] = result
 
         elif atype == "CLAIM_CAUSAL":
             claim  = CausalLinkClaim(**action["claim"], step=self._step)
@@ -171,7 +196,13 @@ class ArbiterEnv:
                                                 "affected_demographic": "unknown",
                                                 "recommended_action": "audit"})
 
-        return self._observation(), reward, False, info
+        # Level 6: inject schema change alert into observation at drift step
+        obs = self._observation()
+        if self._drift_step is not None:
+            alert = schema_drift_observation(self._step, self._drift_step)
+            if alert:
+                obs["schema_change_alert"] = alert
+        return obs, reward, False, info
 
     def render(self) -> Dict:
         """Return visualization-ready data."""
@@ -271,6 +302,11 @@ class ArbiterEnv:
             "recommended_action":   action.get("recommended_action", "audit"),
         }
 
+        # Level 6: penalise if schema drift occurred but was never flagged
+        if (self._drift_step is not None
+                and not getattr(self, "_schema_change_flagged", False)):
+            self._claim_rewards.append(SCHEMA_MISSED_PENALTY)
+
         true_chain = self._anomaly_info.get("causal_chain", [])
         claimed_chain = verdict["primary_evidence_chain"]
 
@@ -323,11 +359,13 @@ class ArbiterEnv:
         self._hypothesis_flags: Dict[str, str] = {}
         self._last_cf_result: Optional[Dict] = None
         self._anomaly_info: Dict    = {}
+        self._drift_step: Optional[int] = None          # Level 6
+        self._schema_change_flagged: bool = False        # Level 6
 
     def _observation(self) -> Dict:
         if self._ep is None:
             return {}
-        return {
+        obs = {
             "step":             self._step,
             "budget_remaining": self._budget,
             "queried_nodes":    list(self._queried_nodes),
@@ -336,6 +374,15 @@ class ArbiterEnv:
             "level":            self.curriculum.level,
             "features":         self._ep.get("features", {}),
         }
+        # Level 6: expose current regulatory schema
+        if self._drift_step is not None:
+            drift_info = self._ep.get("schema_drift", {})
+            obs["schema_drift_active"] = True
+            obs["current_schema"]      = (
+                drift_info.get("post_schema") if self._step >= self._drift_step
+                else drift_info.get("pre_schema")
+            )
+        return obs
 
 
 # ── Multi-session factory ──────────────────────────────────────────────────────

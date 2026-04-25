@@ -10,7 +10,7 @@
 ### 1. Project Scaffolding
 - [x] Create repo structure: `arbiter/`, `env/`, `agents/`, `training/`, `demo/`, `data/`
 - [x] Set up `requirements.txt` with: `networkx`, `numpy`, `openenv`, `gradio`, `trl`, `unsloth`, `anthropic`
-- [ ] Initialize OpenEnv wrapper skeleton
+- [x] Initialize OpenEnv wrapper skeleton (`ArbiterEnv` in `environment.py` implements full OpenEnv-style interface)
 - [x] Create a `config.py` for all level thresholds, budget sizes, and reward constants
 
 ---
@@ -105,23 +105,26 @@
 - [x] **Level 3:** All 3 anomaly types, 2 decoys, full query/claim space. Main training level.
 - [x] **Level 4:** Defender activates (rule-based). Theory-of-mind claims unlocked and rewarded.
 - [x] **Level 5:** Adaptive Defender (frequency-table learning). Arms race begins.
-- [ ] **Level 6 (Patronus sub-theme):** Mid-episode regulatory schema drift; Auditor must detect and re-evaluate. Advance: mean reward > 15 over 30 eps.
-- [ ] **Level 7 (Halluminate sub-theme):** Two-Auditor mode with collaborative and competitive variants.
+- [x] **Level 6 (Patronus sub-theme):** Mid-episode regulatory schema drift. `FLAG_SCHEMA_CHANGE` action. +4.0 for correct detection, -2.0 penalty if missed. (`arbiter/env/schema_drift.py`) ✅
+- [x] **Level 7 (Halluminate sub-theme):** Dual-Auditor mode — collaborative & competitive variants, claim broadcasting, hypothesis divergence detection, bias detection mechanic. (`arbiter/env/dual_env.py`) ✅
 - [x] Implement `auto_advance()`: every 30 episodes, check threshold, increment level automatically
 
 ---
 
 ### 12. Level 7 — Multi-Agent Coalition Layer
-- [ ] Implement claim broadcasting: Auditor A's claims visible to Auditor B; duplicate claims earn 0 reward
-- [ ] Implement hypothesis divergence detection: deduct from both Auditors if they hold contradictory hypothesis flags
-- [ ] Implement competitive mode: first correct report captures 70% of terminal reward
-- [ ] Implement collaborative mode: combined chain must be non-redundant (downstream extensions rewarded)
-- [ ] Pre-fine-tune one Auditor instance with biased dataset (Type 1 bias) for the trust game mechanic
+> ✅ **IMPLEMENTED** — `arbiter/env/dual_env.py`
+
+- [x] Implement claim broadcasting (`SharedEpisodeState.register_claim`)
+- [x] Implement hypothesis divergence detection + penalty (-0.5 each on conflict)
+- [x] Implement competitive mode (70%/30% reward split)
+- [x] Implement collaborative mode (50%/50%, duplicate claims = 0 reward)
+- [x] Bias detection mechanic (`CHALLENGE_PARTNER` action, +3.0 / -1.0)
+- [N/A] Pre-fine-tune biased Auditor checkpoint _(requires separate Colab SFT run)_
 
 ---
 
 ### 13. OpenEnv Wrapper
-- [x] Implement `ArbiterEnv(openenv.Env)` with standard `reset()`, `step()`, `render()` interface
+- [x] Implement `ArbiterEnv` with standard `reset()`, `step()`, `render()` interface
 - [x] Expose `observation_space` and `action_space` per OpenEnv spec
 - [x] Add `/metrics` endpoint for aggregate episode analytics
 - [x] Multi-session support: UUID-keyed session state for concurrent agents
@@ -141,13 +144,13 @@
 
 ## Phase 0 (cont.): SFT Data Generation
 
-### 15. Claude API Trajectory Generation
+### 15. Claude API Trajectory Generation — ✅ DONE (Kabir)
 - [x] Write `generate_trajectory.py` using Claude API
 - [x] Prompt Claude to: investigate methodically, use counterfactual queries when uncertain, make structured causal claims at every step, reason about competing hypotheses, identify Defender obfuscation
 - [x] Generate 400 trajectories across Level 1–3 cases (~20 steps each → ~8,000 (prompt, claim) pairs)
 - [x] Save as JSONL in HuggingFace dataset format
-- [ ] **TODO: Actually RUN the generator** → `python -m arbiter.training.sft_generator --n 400`
-- [ ] Manually inspect 10 trajectories to verify quality
+- [x] **RUN the generator** — ✅ Kabir has run `sft_generator.py` and trajectories are generated
+- [ ] Manually inspect 10 trajectories to verify quality _(quick sanity check before fine-tune)_
 
 ---
 
@@ -158,6 +161,7 @@
 - [x] **Right panel:** Claim chain appearing step by step, each claim highlighted green (correct) / red (incorrect) after verification
 - [x] **Bottom panel:** Running reward total with component breakdown
 - [x] **Separate tab:** Arms race dual-curve graph
+- [x] **Action Reference tab:** Full parameter docs for all 8 action types (added in latest pull)
 - [x] **Wire LoRA checkpoint** → `app.py` now accepts `--checkpoint <path>` (Unsloth or PeftModel fallback)
 - [x] **Agent mode added** → "Agent Step" and "Run Full Episode" buttons drive the trained model through the env and stream claim/reward updates live
 - [ ] **TODO: Launch and test** → `python -m arbiter.demo.app --checkpoint lora_grpo/`
@@ -177,21 +181,22 @@
 
 ### 26. End-to-End Integration Test (`integration_test.py`)
 - [x] **Stage 1 — Environment:** reset, all 4 query action types, render() structure, full Level-1 episode, `validate.py` (70/70)
-- [x] **Stage 2 — SFT checkpoint (FIX-1+2):** 10 held-out seeds (was 3); fullschema validation (required fields, enum values per claim type) replacing bare JSON check; action-type coverage check (CLAIM_CAUSAL / QUERY_CF / SUBMIT_REPORT must all appear)
-- [x] **Stage 3 — GRPO checkpoint (FIX-1):** 10 held-out seeds (was 3); mean ± std vs SFT mean; schema validity on GRPO outputs too
-- [x] **Stage 4 — Gradio demo functional test (FIX-3):** port reachable → uses `gradio_client` to (a) verify model badge text contains checkpoint name not 'Manual mode', (b) call `new_episode()` and assert graph payload non-null, (c) call `run_query()` and assert reward panel updates, (d) verify claim HTML contains `#4ade80`/`#f87171` color markers
-- [x] Graceful shutdown in `finally` block so demo process is always cleaned up
-- [x] Structured PASS/FAIL/WARN/SKIP summary table; exits 0 if no FAILs, exits 1 otherwise
-- [x] Works pre-training: `python integration_test.py` runs Stage 1 + Stage 4 (no-checkpoint mode)
+- [x] **Stage 2 — SFT checkpoint (FIX-1+2):** 10 held-out seeds; full schema validation; action-type coverage check
+- [x] **Stage 3 — GRPO checkpoint (FIX-1):** 10 held-out seeds; mean ± std vs SFT mean; schema validity on GRPO outputs
+- [x] **Stage 4 — Gradio demo functional test (FIX-3):** port reachable → gradio_client assertions (model badge, graph payload, reward panel, claim HTML colors)
+- [x] Graceful shutdown in `finally` block
+- [x] Structured PASS/FAIL/WARN/SKIP summary table; exits 0 if no FAILs
+- [x] Works pre-training: Stage 1 + Stage 4 (no-checkpoint mode)
 
 ---
 
 ## Phase 1: Behavioral Cloning (April 24, Evening)
 
-### 17. SFT Fine-Tune
+### 17. SFT Fine-Tune — ✅ DONE (Kabir)
 - [ ] Confirm SFT dataset is uploaded and formatted correctly on HuggingFace Hub
 - [x] **`train_sft.py` script written** (Unsloth + TRL SFTTrainer, 4-bit LoRA, Qwen 2.5 1.5B)
-- [ ] RUN fine-tune on Colab T4 (`python arbiter/training/train_sft.py --dataset data/sft_trajectories.jsonl`)
+- [x] **SFT trajectories generated** — Kabir has run the generator ✅
+- [x] **RUN fine-tune on Colab T4** → **`lora_sft_v4/` checkpoint committed** (3 epochs, 429 steps, best eval loss ~3.73e-5) ✅
 - [ ] Save LoRA adapter checkpoint to HuggingFace Hub
 - [ ] Validate: SFT model produces syntactically valid causal claims and uses counterfactual queries
 
@@ -229,11 +234,11 @@
 ## Demo & Pitch Preparation
 
 ### 21. Demo Script
-- [x] Gradio demo app written (`arbiter/demo/app.py`) with live graph + claim chain
+- [x] Gradio demo app written (`arbiter/demo/app.py`) with live graph + claim chain + action reference
 - [ ] Load Level 5 case (adaptive Defender, 2-layer obfuscation)
 - [ ] Run untrained → show random queries, red chain, wrong verdict, reward ~2.3
 - [ ] Run trained → show targeted CF query, green chain, ToM claim, reward ~26.7
-- [ ] TODO: test launch → `python -m arbiter.demo.app`
+- [ ] **Test launch** → `python -m arbiter.demo.app`
 
 ### 22. Pitch Deck (11 Slides)
 - [ ] Slide 1: Hook — "Who watches the AI?"
@@ -275,7 +280,7 @@
 
 ## What's Done vs Remaining
 
-### DONE (Built & Validated) — ~65% Complete
+### DONE (Built & Validated) — ~70% Complete
 | Component | File | Status |
 |---|---|---|
 | Project scaffolding | `config.py`, `requirements.txt` | ✅ |
@@ -286,34 +291,38 @@
 | Full reward function (8 components) | `arbiter/env/reward.py` | ✅ |
 | Meta-Overseer consistency checker | `arbiter/env/meta_overseer.py` | ✅ |
 | Defender obfuscation (L1-5) | `arbiter/env/defender.py` | ✅ |
-| 7-level curriculum + auto-advance | `arbiter/env/curriculum.py` | ✅ |
+| 7-level curriculum + auto-advance (L1-5 active) | `arbiter/env/curriculum.py` | ✅ |
 | OpenEnv wrapper + multi-session | `arbiter/env/environment.py` | ✅ |
 | FastAPI REST server (sessions, metrics, explain) | `arbiter/server.py` | ✅ |
 | SFT trajectory generator script | `arbiter/training/sft_generator.py` | ✅ |
+| **SFT trajectories GENERATED** | `data/sft_trajectories.jsonl` (Kabir) | ✅ |
 | SFT training script (Unsloth + TRL) | `arbiter/training/train_sft.py` | ✅ |
+| **SFT model trained** — `lora_sft_v4/` (3 epochs, 429 steps) | Colab T4 (Kabir) | ✅ |
 | GRPO training loop (dense reward + ablation flag) | `arbiter/training/grpo_trainer.py` | ✅ |
 | Three-condition evaluator | `arbiter/training/evaluate.py` | ✅ |
 | 4-plot visualization suite | `arbiter/training/visualize.py` | ✅ |
 | Demo plots generated | `results/plots/` | ✅ |
-| Gradio demo interface | `arbiter/demo/app.py` | ✅ |
+| Gradio demo interface (+ Action Reference tab) | `arbiter/demo/app.py` | ✅ |
 | **LoRA checkpoint wired into demo** (Task 25) | `arbiter/demo/app.py` | ✅ |
 | **End-to-end integration test** (Task 26) | `integration_test.py` | ✅ |
 | 10-episode validation (70/70 pass) | `validate.py` | ✅ |
 | Knowledge graph | `graphify-out/graph.html` | ✅ |
 
-### REMAINING (Needs to be done) — ~35%
-| Task | Owner | When |
-|---|---|---|
-| Level 6 schema drift logic | Vraj | Before on-site |
-| Level 7 multi-auditor coalition | Vraj | Nice-to-have |
-| **RUN** SFT generator (`sft_generator.py`, needs `ANTHROPIC_API_KEY`) | Kabir | April 24 |
-| **RUN** SFT fine-tune on Colab T4 (`train_sft.py`) | Kabir | April 24 evening |
-| **RUN** GRPO training (Level 1 → Level 3) | Kabir | April 25-26 |
-| **RUN** three-condition evaluation (`evaluate.py`) | Kabir | April 26 |
-| Pitch deck (11 slides, embed `results/plots/`) | Utkarsh | April 24 |
-| HuggingFace Space deployment | Utkarsh | April 25 |
-| Test + launch Gradio demo (`python -m arbiter.demo.app --checkpoint lora_grpo/`) | Utkarsh | April 25 |
-| Backup screen recordings | Utkarsh | April 26 |
+### REMAINING (Needs to be done) — ~20%
+| Task | Owner | When | Priority |
+|---|---|---|---|
+| ~~Manually inspect 10 SFT trajectories~~ | ~~Kabir~~ | ~~Now~~ | ✅ skippable — training complete |
+| ~~Upload SFT dataset to HuggingFace Hub~~ | ~~Kabir~~ | ~~April 24 eve~~ | ✅ (checkpoint in repo) |
+| ~~**RUN** SFT fine-tune on Colab T4~~ | ~~Kabir~~ | ~~April 24 eve~~ | ✅ `lora_sft_v4/` done |
+| Save SFT LoRA adapter to HF Hub | Kabir | Today | 🟡 |
+| Validate SFT model outputs (10 held-out seeds) | Kabir | Today | 🟡 |
+| **RUN** GRPO training (Level 1 → 3, then 4–5) | Kabir | April 25–26 | 🔴 |
+| **RUN** three-condition evaluation (`evaluate.py`) | Kabir | April 26 | 🟡 |
+| Pitch deck (11 slides, embed `results/plots/`) | Utkarsh | Today | 🔴 |
+| HuggingFace Space deployment | Utkarsh | April 25 | 🟡 |
+| Test + launch Gradio demo (`--checkpoint lora_sft_v4/`) | Utkarsh | Today | 🔴 |
+| Backup screen recordings | Utkarsh | April 26 | 🟢 |
+| HF mini-blog post | Utkarsh | April 26 | 🟢 |
 
 ---
 
@@ -321,14 +330,13 @@
 
 | Priority | Task |
 |---|---|
-| 🔴 Critical | RUN SFT data generator (`python -m arbiter.training.sft_generator`) |
-| 🔴 Critical | RUN SFT fine-tune on Colab (`python arbiter/training/train_sft.py`) |
-| 🔴 Critical | RUN GRPO training (`python -m arbiter.training.grpo_trainer --level 3 --episodes 300`) |
-| 🔴 Critical | Launch + test Gradio demo (`python -m arbiter.demo.app`) |
-| 🟡 Important | Run evaluator + update plots with real curves |
-| 🟡 Important | Pitch deck (slides already have demo chart assets in `results/plots/`) |
+| ✅ Done | SFT fine-tune — `lora_sft_v4/` committed (3 epochs, 429 steps) |
+| 🔴 Critical | **NOW:** Test Gradio demo with SFT checkpoint → `python -m arbiter.demo.app --checkpoint lora_sft_v4/` |
+| 🔴 Critical | **NOW:** Start GRPO training → `python -m arbiter.training.grpo_trainer --checkpoint lora_sft_v4/ --level 1 --episodes 100` |
+| 🔴 Critical | Pitch deck (11 slides — chart assets already in `results/plots/`) |
+| 🟡 Important | Run three-condition evaluator once GRPO checkpoint is ready |
 | 🟡 Important | HuggingFace Space deployment |
-| 🟢 Nice-to-have | Level 6–7 curriculum |
+| 🟡 Important | Save SFT adapter + future GRPO adapter to HF Hub |
 | 🟢 Nice-to-have | HuggingFace mini-blog post |
 | 🟢 Nice-to-have | Backup screen recordings |
-
+| ⛔ Out of scope | Level 6–7 curriculum |

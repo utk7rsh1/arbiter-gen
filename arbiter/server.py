@@ -30,6 +30,9 @@ import time
 from arbiter.env.environment import (
     ArbiterEnv, create_session, get_session, list_sessions
 )
+from arbiter.env.dual_env import (
+    DualArbiterEnv, create_dual_session, get_dual_session, list_dual_sessions
+)
 
 # ── App ───────────────────────────────────────────────────────────────────────
 app = FastAPI(
@@ -194,7 +197,74 @@ def leaderboard():
     return {"leaderboard": rows[:10]}
 
 
+# ── Level 7 — Dual-Auditor Endpoints ─────────────────────────────────────────
+
+class CreateDualSessionRequest(BaseModel):
+    level: int = 7
+    mode:  str = "collaborative"   # "collaborative" or "competitive"
+    seed:  Optional[int] = None
+
+
+class DualStepRequest(BaseModel):
+    auditor_id: str          # "A" or "B"
+    action:     Dict[str, Any]
+
+
+@app.post("/dual-sessions")
+def create_dual_session_endpoint(req: CreateDualSessionRequest):
+    """Create a Level-7 dual-auditor session. Returns session_id."""
+    sid = create_dual_session(level=req.level, mode=req.mode, seed=req.seed)
+    _global_stats["total_sessions"] += 1
+    return {"session_id": sid, "level": req.level, "mode": req.mode, "created": time.time()}
+
+
+@app.get("/dual-sessions")
+def list_dual_sessions_endpoint():
+    return {"sessions": list_dual_sessions(), "count": len(list_dual_sessions())}
+
+
+@app.post("/dual-sessions/{session_id}/reset")
+def dual_reset_endpoint(session_id: str, req: ResetRequest):
+    dual = _get_dual(session_id)
+    obs_a, obs_b = dual.reset(seed=req.seed)
+    _global_stats["total_episodes"] += 1
+    return {"observation_A": obs_a, "observation_B": obs_b}
+
+
+@app.post("/dual-sessions/{session_id}/step")
+def dual_step_endpoint(session_id: str, req: DualStepRequest):
+    """Step for one auditor (A or B). Other auditor steps independently."""
+    dual = _get_dual(session_id)
+    obs, reward, done, info = dual.step(req.auditor_id, req.action)
+    return {
+        "observation": obs,
+        "reward":      reward,
+        "done":        done,
+        "info":        _serialize(info),
+    }
+
+
+@app.get("/dual-sessions/{session_id}/render")
+def dual_render_endpoint(session_id: str, auditor_id: str = "A"):
+    dual = _get_dual(session_id)
+    return dual.render(auditor_id=auditor_id)
+
+
+@app.get("/dual-sessions/{session_id}/metrics")
+def dual_metrics_endpoint(session_id: str):
+    dual = _get_dual(session_id)
+    return dual.get_metrics()
+
+
 # ── Helpers ────────────────────────────────────────────────────────────────────
+
+def _get_dual(session_id: str) -> DualArbiterEnv:
+    dual = get_dual_session(session_id)
+    if dual is None:
+        raise HTTPException(status_code=404,
+                            detail=f"Dual session '{session_id}' not found.")
+    return dual
+
 
 def _get_env(session_id: str) -> ArbiterEnv:
     env = get_session(session_id)
