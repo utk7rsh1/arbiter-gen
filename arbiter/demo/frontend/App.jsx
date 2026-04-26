@@ -26,6 +26,9 @@
       return 'base';
     };
 
+    // Debounce timer for seed-triggered resets
+    const seedResetTimer = useRef(null);
+
     // ── Landing: Loan selected ─────────────────────────────────────────────
     const handleSelectLoan = () => {
       setDomainMode('loan');
@@ -56,6 +59,19 @@
       const domainJson = domainMode === 'custom' ? customDomain : null;
       episode.newSession(levelNum, seed, checkpointFor(modelMode), domainJson);
     }, [level, seed, modelMode, episode, domainMode, customDomain]);
+
+    // Changing the seed auto-resets the episode after a short debounce so the
+    // user doesn't have to manually click ↺ each time.
+    const handleSeedChange = useCallback((newSeed) => {
+      setSeed(newSeed);
+      if (screen !== 'episode') return;
+      if (seedResetTimer.current) clearTimeout(seedResetTimer.current);
+      seedResetTimer.current = setTimeout(() => {
+        const levelNum = typeof level === 'number' ? level : (parseInt((level + '').replace('L', '')) || 1);
+        const domainJson = domainMode === 'custom' ? customDomain : null;
+        episode.newSession(levelNum, newSeed, checkpointFor(modelMode), domainJson);
+      }, 600);
+    }, [screen, level, modelMode, episode, domainMode, customDomain]);
 
     // Auto-start session when screen becomes 'episode' (only for Live tab)
     useEffect(() => {
@@ -150,7 +166,7 @@
         <window.EpisodeControls
           level={'L' + level}      onLevelChange={l => setLevel(parseInt(l.replace('L','')) || 1)}
           modelMode={modelMode}    onModelChange={setModelMode}
-          seed={seed}              onSeedChange={setSeed}
+          seed={seed}              onSeedChange={handleSeedChange}
           speed={speed}            onSpeedChange={setSpeed}
           step={episode.step}      maxSteps={episode.maxSteps}
           isRunning={episode.isRunning}

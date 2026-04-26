@@ -1,0 +1,166 @@
+{
+  "domain_name": "Software Engineering Hiring",
+  "decision_verb": "hired",
+  "positive_outcome": "hired",
+  "negative_outcome": "rejected",
+  "explicit_features": [
+    {
+      "name": "technical_score",
+      "description": "Score based on technical skills",
+      "dtype": "continuous",
+      "value_range": [
+        0.0,
+        100.0
+      ],
+      "categories": null,
+      "protected_attribute": null
+    },
+    {
+      "name": "years_of_experience",
+      "description": "Number of years of experience in software engineering",
+      "dtype": "continuous",
+      "value_range": [
+        0.0,
+        20.0
+      ],
+      "categories": null,
+      "protected_attribute": null
+    },
+    {
+      "name": "education_level",
+      "description": "Level of education",
+      "dtype": "categorical",
+      "value_range": null,
+      "categories": [
+        "high_school",
+        "bachelor",
+        "master",
+        "phd"
+      ],
+      "protected_attribute": null
+    },
+    {
+      "name": "salary_expectation",
+      "description": "Expected salary",
+      "dtype": "continuous",
+      "value_range": [
+        50000.0,
+        200000.0
+      ],
+      "categories": null,
+      "protected_attribute": null
+    },
+    {
+      "name": "location",
+      "description": "Location of the candidate",
+      "dtype": "categorical",
+      "value_range": null,
+      "categories": [
+        "urban",
+        "rural",
+        "suburban"
+      ],
+      "protected_attribute": null
+    },
+    {
+      "name": "certifications",
+      "description": "Number of relevant certifications",
+      "dtype": "continuous",
+      "value_range": [
+        0.0,
+        10.0
+      ],
+      "categories": null,
+      "protected_attribute": null
+    }
+  ],
+  "proxy_features": [
+    {
+      "name": "neighborhood",
+      "description": "Neighborhood of the candidate",
+      "dtype": "categorical",
+      "value_range": null,
+      "categories": [
+        "low_income",
+        "medium_income",
+        "high_income"
+      ],
+      "protected_attribute": "socioeconomic_status"
+    },
+    {
+      "name": "language_spoken",
+      "description": "Language spoken at home",
+      "dtype": "categorical",
+      "value_range": null,
+      "categories": [
+        "english",
+        "spanish",
+        "other"
+      ],
+      "protected_attribute": "nationality"
+    },
+    {
+      "name": "age_group",
+      "description": "Age group of the candidate",
+      "dtype": "categorical",
+      "value_range": null,
+      "categories": [
+        "young",
+        "middle_aged",
+        "senior"
+      ],
+      "protected_attribute": "age"
+    }
+  ],
+  "hidden_features": [
+    {
+      "name": "culture_fit_score",
+      "description": "Score based on culture fit",
+      "dtype": "continuous",
+      "value_range": [
+        0.0,
+        100.0
+      ],
+      "categories": null,
+      "protected_attribute": null
+    },
+    {
+      "name": "team_match_score",
+      "description": "Score based on team match",
+      "dtype": "continuous",
+      "value_range": [
+        0.0,
+        100.0
+      ],
+      "categories": null,
+      "protected_attribute": null
+    }
+  ],
+  "outcome_nodes": [
+    "hiring_rate_overall",
+    "hiring_rate_by_location",
+    "hiring_rate_by_education_level"
+  ],
+  "approval_threshold_description": "technical_score > 70",
+  "approval_threshold_feature": "technical_score",
+  "approval_threshold_value": 70.0,
+  "discriminated_group_value": "low_income",
+  "discriminated_group_feature": "neighborhood",
+  "anomaly_description": "The hiring AI is biased against candidates from low-income neighborhoods",
+  "causal_chain": [
+    "neighborhood",
+    "culture_fit_score",
+    "hiring_rate_overall"
+  ],
+  "system_description": "The hiring AI screens software engineering resumes based on technical skills, experience, and education level. The AI also considers culture fit and team match scores, which are not explicitly disclosed.",
+  "seasonal_decoy_feature": "salary_expectation",
+  "seasonal_decoy_secondary_feature": "certifications",
+  "legitimate_risk_feature": "years_of_experience",
+  "legitimate_risk_threshold": 5.0,
+  "drift_regulation_name": "AI Fairness Directive 2026",
+  "newly_non_compliant_features": [
+    "neighborhood",
+    "language_spoken"
+  ],
+  "drift_change_description": "Under the new regulation, use of neighborhood and language spoken in hiring decisions is prohibited."
+}

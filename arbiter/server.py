@@ -18,6 +18,15 @@ Usage:
 from __future__ import annotations
 
 import os
+
+# Load .env so GROQ_API_KEY (and any other secrets) are available without
+# having to export them manually before starting the server.
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # python-dotenv not installed; rely on shell env vars
+
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
