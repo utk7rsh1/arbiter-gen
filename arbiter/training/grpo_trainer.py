@@ -57,11 +57,36 @@ def _get_model(checkpoint: str = "lora_sft/"):
         except Exception:
             from transformers import AutoModelForCausalLM, AutoTokenizer
             from peft import PeftModel
+            import os
+            local_path = os.path.abspath(checkpoint)
+
+            # Check whether the adapter weights file was actually saved.
+            # SFT jobs sometimes save config/tokenizer but skip the weights.
+            adapter_weights = (
+                os.path.join(local_path, "adapter_model.safetensors"),
+                os.path.join(local_path, "adapter_model.bin"),
+            )
+            has_weights = any(os.path.exists(f) for f in adapter_weights)
+
             base = AutoModelForCausalLM.from_pretrained(
                 "Qwen/Qwen2.5-1.5B-Instruct", device_map="auto",
-                torch_dtype=torch.float16)
-            model    = PeftModel.from_pretrained(base, checkpoint)
-            tokenizer = AutoTokenizer.from_pretrained(checkpoint)
+                dtype=torch.float16)
+
+            if has_weights:
+                model = PeftModel.from_pretrained(base, local_path, local_files_only=True)
+            else:
+                print(
+                    f"[WARNING] No adapter weights found in '{local_path}'. "
+                    "Starting GRPO from the base Qwen model instead."
+                )
+                model = base
+
+            # Use the checkpoint's tokenizer if it was saved there, otherwise
+            # fall back to the base model tokenizer from the Hub.
+            tok_path = local_path if os.path.exists(
+                os.path.join(local_path, "tokenizer.json")) else "Qwen/Qwen2.5-1.5B-Instruct"
+            tokenizer = AutoTokenizer.from_pretrained(
+                tok_path, local_files_only=tok_path == local_path)
 
         tokenizer.pad_token = tokenizer.eos_token
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -127,9 +152,17 @@ def generate_action(
     )
     messages.append({"role": "user", "content": obs_text})
 
-    input_ids = tokenizer.apply_chat_template(
+    encoded = tokenizer.apply_chat_template(
         messages, tokenize=True, add_generation_prompt=True,
-        return_tensors="pt").to(device)
+        return_tensors="pt")
+    # apply_chat_template may return a BatchEncoding dict or a plain tensor
+    # depending on the transformers version — always extract the tensor.
+    if hasattr(encoded, "input_ids"):
+        input_ids = encoded.input_ids.to(device)
+    elif isinstance(encoded, dict):
+        input_ids = encoded["input_ids"].to(device)
+    else:
+        input_ids = encoded.to(device)
 
     with torch.no_grad():
         output = model.generate(

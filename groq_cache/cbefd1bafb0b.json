@@ -1,0 +1,161 @@
+{
+  "domain_name": "College Admissions",
+  "decision_verb": "admitted",
+  "positive_outcome": "admitted",
+  "negative_outcome": "rejected",
+  "explicit_features": [
+    {
+      "name": "gpa",
+      "description": "Applicant's high school GPA",
+      "dtype": "continuous",
+      "value_range": [
+        2.0,
+        4.0
+      ],
+      "categories": null,
+      "protected_attribute": null
+    },
+    {
+      "name": "sat_score",
+      "description": "Applicant's SAT score",
+      "dtype": "continuous",
+      "value_range": [
+        400.0,
+        1600.0
+      ],
+      "categories": null,
+      "protected_attribute": null
+    },
+    {
+      "name": "extracurricular_activities",
+      "description": "Number of extracurricular activities",
+      "dtype": "continuous",
+      "value_range": [
+        0.0,
+        10.0
+      ],
+      "categories": null,
+      "protected_attribute": null
+    },
+    {
+      "name": "volunteer_hours",
+      "description": "Number of volunteer hours",
+      "dtype": "continuous",
+      "value_range": [
+        0.0,
+        1000.0
+      ],
+      "categories": null,
+      "protected_attribute": null
+    },
+    {
+      "name": "essay_quality",
+      "description": "Quality of applicant's essay",
+      "dtype": "continuous",
+      "value_range": [
+        1.0,
+        5.0
+      ],
+      "categories": null,
+      "protected_attribute": null
+    },
+    {
+      "name": "recommendation_strength",
+      "description": "Strength of applicant's recommendations",
+      "dtype": "continuous",
+      "value_range": [
+        1.0,
+        5.0
+      ],
+      "categories": null,
+      "protected_attribute": null
+    }
+  ],
+  "proxy_features": [
+    {
+      "name": "zip_code",
+      "description": "Applicant's zip code",
+      "dtype": "categorical",
+      "value_range": null,
+      "categories": [
+        "low_income_zip",
+        "middle_income_zip",
+        "high_income_zip"
+      ],
+      "protected_attribute": "socioeconomic_status"
+    },
+    {
+      "name": "first_generation_college",
+      "description": "Whether applicant is a first-generation college student",
+      "dtype": "binary",
+      "value_range": null,
+      "categories": null,
+      "protected_attribute": "socioeconomic_status"
+    },
+    {
+      "name": "parental_education",
+      "description": "Highest level of parental education",
+      "dtype": "categorical",
+      "value_range": null,
+      "categories": [
+        "high_school",
+        "some_college",
+        "bachelors",
+        "masters",
+        "phd"
+      ],
+      "protected_attribute": "socioeconomic_status"
+    }
+  ],
+  "hidden_features": [
+    {
+      "name": "applicant_potential",
+      "description": "Internal score for applicant's potential",
+      "dtype": "continuous",
+      "value_range": [
+        0.0,
+        1.0
+      ],
+      "categories": null,
+      "protected_attribute": null
+    },
+    {
+      "name": "fit_with_college",
+      "description": "Internal score for applicant's fit with the college",
+      "dtype": "continuous",
+      "value_range": [
+        0.0,
+        1.0
+      ],
+      "categories": null,
+      "protected_attribute": null
+    }
+  ],
+  "outcome_nodes": [
+    "admission_rate_overall",
+    "admission_rate_by_major"
+  ],
+  "approval_threshold_description": "gpa > 3.5",
+  "approval_threshold_feature": "gpa",
+  "approval_threshold_value": 3.5,
+  "discriminated_group_value": "low_income_zip",
+  "discriminated_group_feature": "zip_code",
+  "anomaly_description": "The AI system is biased against applicants from low-income zip codes.",
+  "causal_chain": [
+    "zip_code",
+    "applicant_potential",
+    "admission_rate_overall"
+  ],
+  "system_description": "The college admissions AI evaluates applicants based on their GPA, SAT score, extracurricular activities, volunteer hours, essay quality, and recommendation strength. The AI also considers internal scores for applicant potential and fit with the college.",
+  "seasonal_decoy_feature": "volunteer_hours",
+  "seasonal_decoy_secondary_feature": "extracurricular_activities",
+  "legitimate_risk_feature": "sat_score",
+  "legitimate_risk_threshold": 1000.0,
+  "drift_regulation_name": "AI Fairness Directive 2026",
+  "newly_non_compliant_features": [
+    "zip_code",
+    "first_generation_college",
+    "parental_education"
+  ],
+  "drift_change_description": "Under the new regulation, use of socioeconomic status in college admissions decisions is prohibited."
+}

@@ -29,9 +29,12 @@ window.useEpisode = function useEpisode(backend) {
   const [budget, setBudget]               = useState(20);
   const [episodeHistory, setEpisodeHistory] = useState([]);
 
-  const runIntervalRef = useRef(null);
-  const deltaIdRef     = useRef(0);
-  const stepRef        = useRef(0); // always-current ref for use inside intervals
+  const runIntervalRef  = useRef(null);
+  const deltaIdRef      = useRef(0);
+  const stepRef         = useRef(0); // always-current ref for use inside intervals
+  const checkpointRef   = useRef('base'); // updated by App when modelMode changes
+
+  const setCheckpoint = useCallback((cp) => { checkpointRef.current = cp; }, []);
 
   // Keep stepRef in sync
   useEffect(() => { stepRef.current = step; }, [step]);
@@ -69,7 +72,7 @@ window.useEpisode = function useEpisode(backend) {
       const sess = await backend.createSession(level, seed, checkpoint, domainJson || null);
       const sid = sess.session_id;
       setSessionId(sid);
-      const obs = await backend.resetSession(sid, seed);
+      await backend.resetSession(sid, seed);
       const render = await backend.renderSession(sid);
       _applyRender(render);
     } catch (e) {
@@ -241,14 +244,28 @@ window.useEpisode = function useEpisode(backend) {
     const epDone  = overrideDone      !== undefined ? overrideDone      : isDone;
     if (!sid || epDone) return;
 
-    const currentStep = stepRef.current;
-    const action = _getScriptedAction(currentStep);
+    const currentStep  = stepRef.current;
+    const checkpoint   = checkpointRef.current;
+    const usingModel   = checkpoint && checkpoint !== 'base';
 
-    // Strip _ui before sending to backend — Python dataclass rejects unknown kwargs
-    const { _ui: ui = {}, ...actionForBackend } = action;
+    // ── Choose action source ──────────────────────────────────────────────────
+    let action;
+    let ui = {};
+    let result;
 
     try {
-      const result = await backend.stepSession(sid, actionForBackend);
+      if (usingModel) {
+        // Model-driven: backend selects the action via the GRPO LLM
+        result = await backend.agentStep(sid, checkpoint);
+        action = result.action || { type: 'QUERY_RECORDS', feature_filter: {} };
+      } else {
+        // Scripted: hardcoded demo sequence
+        const rawAction = _getScriptedAction(currentStep);
+        const { _ui: rawUi = {}, ...actionForBackend } = rawAction;
+        ui     = rawUi;
+        action = rawAction;
+        result = await backend.stepSession(sid, actionForBackend);
+      }
       const { observation, reward: stepReward, done, info } = result;
 
       // ── Observation updates ─────────────────────────────────────────────────
@@ -468,6 +485,6 @@ window.useEpisode = function useEpisode(backend) {
     step, maxSteps, isRunning, isDone, nodeStates,
     anomalyNodes, anomalyEdges, overseers, rewardDeltas, episodeReward,
     serverStatus, budget, episodeHistory,
-    newSession, doStep, startAuto, stopAuto, checkHealth,
+    newSession, doStep, startAuto, stopAuto, checkHealth, setCheckpoint,
   };
 };

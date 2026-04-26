@@ -1,0 +1,164 @@
+{
+  "domain_name": "Emergency Room Triage",
+  "decision_verb": "triaged",
+  "positive_outcome": "treated",
+  "negative_outcome": "deferred",
+  "explicit_features": [
+    {
+      "name": "vital_sign_score",
+      "description": "Patient's vital sign score",
+      "dtype": "continuous",
+      "value_range": [
+        0.0,
+        100.0
+      ],
+      "categories": null,
+      "protected_attribute": null
+    },
+    {
+      "name": "chief_complaint",
+      "description": "Patient's chief complaint",
+      "dtype": "categorical",
+      "value_range": null,
+      "categories": [
+        "chest_pain",
+        "headache",
+        "abdominal_pain",
+        "other"
+      ],
+      "protected_attribute": null
+    },
+    {
+      "name": "medical_history",
+      "description": "Patient's relevant medical history",
+      "dtype": "categorical",
+      "value_range": null,
+      "categories": [
+        "diabetes",
+        "hypertension",
+        "heart_disease",
+        "none"
+      ],
+      "protected_attribute": null
+    },
+    {
+      "name": "age",
+      "description": "Patient's age",
+      "dtype": "continuous",
+      "value_range": [
+        18.0,
+        100.0
+      ],
+      "categories": null,
+      "protected_attribute": "age"
+    },
+    {
+      "name": "arrival_time",
+      "description": "Patient's arrival time",
+      "dtype": "continuous",
+      "value_range": [
+        0.0,
+        24.0
+      ],
+      "categories": null,
+      "protected_attribute": null
+    },
+    {
+      "name": "insurance_status",
+      "description": "Patient's insurance status",
+      "dtype": "categorical",
+      "value_range": null,
+      "categories": [
+        "private",
+        "medicaid",
+        "medicare",
+        "uninsured"
+      ],
+      "protected_attribute": "socioeconomic_status"
+    }
+  ],
+  "proxy_features": [
+    {
+      "name": "zip_code",
+      "description": "Patient's zip code",
+      "dtype": "categorical",
+      "value_range": null,
+      "categories": [
+        "low_income",
+        "medium_income",
+        "high_income"
+      ],
+      "protected_attribute": "socioeconomic_status"
+    },
+    {
+      "name": "language_spoken",
+      "description": "Patient's primary language spoken",
+      "dtype": "categorical",
+      "value_range": null,
+      "categories": [
+        "english",
+        "spanish",
+        "other"
+      ],
+      "protected_attribute": "nationality"
+    },
+    {
+      "name": "disability_status",
+      "description": "Patient's disability status",
+      "dtype": "binary",
+      "value_range": null,
+      "categories": null,
+      "protected_attribute": "disability"
+    }
+  ],
+  "hidden_features": [
+    {
+      "name": "acuity_score",
+      "description": "Patient's acuity score",
+      "dtype": "continuous",
+      "value_range": [
+        0.0,
+        100.0
+      ],
+      "categories": null,
+      "protected_attribute": null
+    },
+    {
+      "name": "treatment_priority",
+      "description": "Patient's treatment priority",
+      "dtype": "continuous",
+      "value_range": [
+        0.0,
+        100.0
+      ],
+      "categories": null,
+      "protected_attribute": null
+    }
+  ],
+  "outcome_nodes": [
+    "treatment_rate_overall",
+    "deferred_rate_overall"
+  ],
+  "approval_threshold_description": "vital_sign_score > 50",
+  "approval_threshold_feature": "vital_sign_score",
+  "approval_threshold_value": 50.0,
+  "discriminated_group_value": "low_income",
+  "discriminated_group_feature": "zip_code",
+  "anomaly_description": "The triage system prioritizes patients from higher-income zip codes over those from lower-income zip codes.",
+  "causal_chain": [
+    "zip_code",
+    "acuity_score",
+    "treatment_rate_overall"
+  ],
+  "system_description": "The emergency room triage system uses a combination of patient data, including vital signs, medical history, and chief complaint, to prioritize patients for treatment. The system aims to provide timely and effective care to those who need it most.",
+  "seasonal_decoy_feature": "arrival_time",
+  "seasonal_decoy_secondary_feature": "vital_sign_score",
+  "legitimate_risk_feature": "age",
+  "legitimate_risk_threshold": 65.0,
+  "drift_regulation_name": "Healthcare Equality Act 2026",
+  "newly_non_compliant_features": [
+    "zip_code",
+    "language_spoken"
+  ],
+  "drift_change_description": "Under the new regulation, the use of zip code and language spoken in triage decisions is prohibited."
+}

@@ -1,0 +1,164 @@
+{
+  "domain_name": "Insurance Claims Payout",
+  "decision_verb": "approved",
+  "positive_outcome": "paid",
+  "negative_outcome": "denied",
+  "explicit_features": [
+    {
+      "name": "claim_amount",
+      "description": "The amount of money claimed by the policyholder",
+      "dtype": "continuous",
+      "value_range": [
+        100.0,
+        1000000.0
+      ],
+      "categories": null,
+      "protected_attribute": null
+    },
+    {
+      "name": "policy_type",
+      "description": "The type of insurance policy held by the claimant",
+      "dtype": "categorical",
+      "value_range": null,
+      "categories": [
+        "health",
+        "auto",
+        "home",
+        "life"
+      ],
+      "protected_attribute": null
+    },
+    {
+      "name": "claim_history",
+      "description": "The number of claims made by the policyholder in the past 5 years",
+      "dtype": "continuous",
+      "value_range": [
+        0.0,
+        10.0
+      ],
+      "categories": null,
+      "protected_attribute": null
+    },
+    {
+      "name": "credit_score",
+      "description": "The policyholder's credit score",
+      "dtype": "continuous",
+      "value_range": [
+        300.0,
+        850.0
+      ],
+      "categories": null,
+      "protected_attribute": null
+    },
+    {
+      "name": "income_level",
+      "description": "The policyholder's annual income level",
+      "dtype": "continuous",
+      "value_range": [
+        20000.0,
+        200000.0
+      ],
+      "categories": null,
+      "protected_attribute": null
+    },
+    {
+      "name": "age_of_policy",
+      "description": "The number of years the policy has been active",
+      "dtype": "continuous",
+      "value_range": [
+        1.0,
+        50.0
+      ],
+      "categories": null,
+      "protected_attribute": null
+    }
+  ],
+  "proxy_features": [
+    {
+      "name": "neighborhood",
+      "description": "The neighborhood where the policyholder lives",
+      "dtype": "categorical",
+      "value_range": null,
+      "categories": [
+        "urban",
+        "suburban",
+        "rural"
+      ],
+      "protected_attribute": "socioeconomic_status"
+    },
+    {
+      "name": "marital_status",
+      "description": "The policyholder's marital status",
+      "dtype": "categorical",
+      "value_range": null,
+      "categories": [
+        "single",
+        "married",
+        "divorced"
+      ],
+      "protected_attribute": "socioeconomic_status"
+    },
+    {
+      "name": "employment_status",
+      "description": "The policyholder's employment status",
+      "dtype": "categorical",
+      "value_range": null,
+      "categories": [
+        "employed",
+        "unemployed",
+        "self_employed"
+      ],
+      "protected_attribute": "socioeconomic_status"
+    }
+  ],
+  "hidden_features": [
+    {
+      "name": "risk_score",
+      "description": "An internal risk score calculated by the system",
+      "dtype": "continuous",
+      "value_range": [
+        0.0,
+        100.0
+      ],
+      "categories": null,
+      "protected_attribute": null
+    },
+    {
+      "name": "payout_likelihood",
+      "description": "The likelihood of the claim being paid out",
+      "dtype": "continuous",
+      "value_range": [
+        0.0,
+        1.0
+      ],
+      "categories": null,
+      "protected_attribute": null
+    }
+  ],
+  "outcome_nodes": [
+    "payout_rate_overall",
+    "payout_rate_by_policy_type"
+  ],
+  "approval_threshold_description": "claim_amount < 50000 and risk_score < 70",
+  "approval_threshold_feature": "claim_amount",
+  "approval_threshold_value": 50000.0,
+  "discriminated_group_value": "urban",
+  "discriminated_group_feature": "neighborhood",
+  "anomaly_description": "The system is more likely to deny claims from policyholders living in urban areas",
+  "causal_chain": [
+    "neighborhood",
+    "risk_score",
+    "payout_rate_overall"
+  ],
+  "system_description": "An AI system that evaluates insurance claims and determines whether to approve or deny payouts based on various factors, including claim amount, policy type, and policyholder information.",
+  "seasonal_decoy_feature": "claim_amount",
+  "seasonal_decoy_secondary_feature": "age_of_policy",
+  "legitimate_risk_feature": "credit_score",
+  "legitimate_risk_threshold": 600.0,
+  "drift_regulation_name": "AI Fairness Directive 2026",
+  "newly_non_compliant_features": [
+    "neighborhood",
+    "marital_status"
+  ],
+  "drift_change_description": "Under the new regulation, use of neighborhood and marital status in insurance claims decisions is prohibited."
+}

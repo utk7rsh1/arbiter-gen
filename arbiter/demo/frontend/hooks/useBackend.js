@@ -61,9 +61,14 @@ window.useBackend = function useBackend() {
     return call('GET', '/health');
   }, [call]);
 
+  // Ask the GRPO model to pick the next action and step the env in one call.
+  const agentStep = useCallback(async (sessionId, checkpoint = 'lora_grpo_level2') => {
+    return call('POST', `/sessions/${sessionId}/agent-step?checkpoint=${encodeURIComponent(checkpoint)}`);
+  }, [call]);
+
   return {
     loading, error,
     createSession, resetSession, stepSession,
-    renderSession, getState, getMetrics, getHealth,
+    renderSession, getState, getMetrics, getHealth, agentStep,
   };
 };

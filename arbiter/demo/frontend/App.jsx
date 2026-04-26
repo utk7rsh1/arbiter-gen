@@ -22,7 +22,7 @@
 
     const checkpointFor = (model) => {
       if (model === 'SFT ONLY')     return 'lora_sft';
-      if (model === 'FULL ARBITER') return 'lora_grpo';
+      if (model === 'FULL ARBITER') return 'lora_grpo_level2';
       return 'base';
     };
 
@@ -83,6 +83,11 @@
         setDomainLabel(lbl);
       }
     }, [screen]);
+
+    // Keep the episode's checkpoint ref in sync whenever the model toggle changes
+    useEffect(() => {
+      episode.setCheckpoint(checkpointFor(modelMode));
+    }, [modelMode]);
 
     const handleStep = useCallback(() => {
       if (speed === 'MANUAL') {
@@ -237,19 +242,19 @@
 
             {activeTab === 'ARMS_RACE' && (
               <div style={{ flex: 1, minHeight: 0 }}>
-                <window.ArmsRaceChart />
+                <window.ArmsRaceChart domainMode={domainMode} />
               </div>
             )}
 
             {activeTab === 'COMPARISON' && (
               <div style={{ flex: 1, minHeight: 0 }}>
-                <window.ContrastPanel />
+                <window.ContrastPanel domainMode={domainMode} />
               </div>
             )}
 
             {activeTab === 'STATS' && (
               <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
-                <window.StatsPage metricsData={null} />
+                <window.StatsPage metricsData={null} domainMode={domainMode} />
               </div>
             )}
 

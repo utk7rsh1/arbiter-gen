@@ -94,12 +94,23 @@ if os.path.isdir(_FRONTEND_DIR):
         return FileResponse(os.path.join(_FRONTEND_DIR, "index.html"))
 
 _global_start = time.time()
+
+# Clear stale training log from previous server runs so the UI doesn't show
+# output from a run that happened before this server process started.
+import pathlib as _pathlib
+_stale_log = _pathlib.Path(__file__).parent.parent / "logs" / "grpo_stdout.log"
+if _stale_log.exists():
+    _stale_log.write_text("")  # truncate, don't delete (endpoint reads it)
+
 _global_stats: Dict[str, Any] = {
     "total_sessions":  0,
     "total_episodes":  0,
     "total_rewards":   [],
     "verdicts_correct": 0,
 }
+
+# Per-session LLM conversation history for agent-step inference
+_agent_histories: Dict[str, list] = {}
 
 
 # ── Schemas ────────────────────────────────────────────────────────────────────
@@ -191,8 +202,57 @@ def list_sessions_endpoint():
 def reset_endpoint(session_id: str, req: ResetRequest):
     env = _get_env(session_id)
     obs = env.reset(seed=req.seed)
+    _agent_histories.pop(session_id, None)  # clear LLM history on each new episode
     _global_stats["total_episodes"] += 1
     return {"observation": obs}
+
+
+@app.post("/sessions/{session_id}/agent-step")
+def agent_step_endpoint(session_id: str, checkpoint: str = "lora_grpo_level2"):
+    """
+    Let the GRPO model choose the next action, then step the environment.
+    The model sees the current observation plus up to 6 turns of conversation
+    history so it can reason over its prior queries.
+    Returns {action, observation, reward, done, info} — same shape as /step.
+    """
+    env = _get_env(session_id)
+    obs = env._observation()
+    history = _agent_histories.get(session_id, [])
+
+    try:
+        from arbiter.training.grpo_trainer import generate_action, _get_model
+        cached = _get_model(checkpoint)
+        action, action_text, obs_text = generate_action(
+            obs, history,
+            model=cached["model"],
+            tokenizer=cached["tokenizer"],
+            device=cached["device"],
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Model inference failed for checkpoint '{checkpoint}': {exc}",
+        )
+
+    step_obs, reward, done, info = env.step(action)
+
+    # Append this turn to the rolling history (keep last 10 turns)
+    history = history[-(9):] + [{"obs_text": obs_text, "action_text": action_text}]
+    _agent_histories[session_id] = history
+
+    if done and "episode_reward" in info:
+        r = info["episode_reward"]["total"]
+        _global_stats["total_rewards"].append(r)
+        if info["episode_reward"]["terminal"].get("verdict_correct"):
+            _global_stats["verdicts_correct"] += 1
+
+    return {
+        "action":      action,
+        "observation": step_obs,
+        "reward":      reward,
+        "done":        done,
+        "info":        _serialize(info),
+    }
 
 
 @app.post("/sessions/{session_id}/step")
